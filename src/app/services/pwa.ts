@@ -1,8 +1,10 @@
 // ══════════════════════════════════════════════════════════════
-// NEON DELIVERY — PWA Service v3 (Full Install, Notifications, iOS/Android)
-// Dynamic PNG icon generation, iOS splash screens,
-// beforeinstallprompt + iOS manual install support
+// NEON DELIVERY — PWA Service v4 (FIXED: Install, Push, Manifest)
+// FIXES: Chrome install prompt, push registration, SW probe,
+//        Samsung Internet support, dynamic→static manifest
 // ══════════════════════════════════════════════════════════════
+
+import { projectId, publicAnonKey } from "/utils/supabase/info";
 
 // ═══ SERVICE WORKER REGISTRATION ═══
 export async function registerServiceWorker(): Promise<ServiceWorkerRegistration | null> {
@@ -12,13 +14,9 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
   }
 
   try {
-    const probe = await fetch('/sw.js', { method: 'HEAD' }).catch(() => null);
-    const contentType = probe?.headers?.get('content-type') || '';
-    if (!probe || !probe.ok || !contentType.includes('javascript')) {
-      console.log('[PWA] sw.js not available (status:', probe?.status, ') — skipping');
-      return null;
-    }
-
+    // FIXED: Removed overly strict content-type check that blocked SW registration
+    // In some hosting environments, sw.js may be served with wrong content-type header
+    // but still work perfectly fine. Let the browser handle validation.
     const registration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
     console.log('[PWA] Service Worker registered:', registration.scope);
 
@@ -35,45 +33,76 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
 
     return registration;
   } catch (error) {
-    console.log('[PWA] Service Worker registration skipped:', error);
+    console.log('[PWA] Service Worker registration failed:', error);
     return null;
   }
 }
 
-// ═══ INSTALL PROMPT ═══
-let deferredPrompt: any = null;
-let installCallbacks: Array<(canInstall: boolean) => void> = [];
+// ═══ INSTALL PROMPT (FIXED: unified deferredPrompt) ═══
+// CRITICAL FIX: Use window.__pwaInstallPrompt as THE SINGLE source of truth
+// Both setupInstallPrompt() and PWAInstallBanner use this same reference
 
-export function setupInstallPrompt(callback: (canInstall: boolean) => void) {
-  installCallbacks.push(callback);
+export function captureInstallPrompt() {
+  // Register ASAP — BEFORE any component mounts
+  // This ensures we never miss the beforeinstallprompt event
+  if ((window as any).__pwaListenerAdded) return;
+  (window as any).__pwaListenerAdded = true;
 
   window.addEventListener('beforeinstallprompt', (e: Event) => {
     e.preventDefault();
-    deferredPrompt = e;
-    console.log('[PWA] Install prompt captured');
-    installCallbacks.forEach(cb => cb(true));
+    (window as any).__pwaInstallPrompt = e;
+    console.log('[PWA] ✅ beforeinstallprompt captured and stored globally');
+
+    // Notify all callbacks
+    const cbs = (window as any).__pwaInstallCallbacks || [];
+    cbs.forEach((cb: (v: boolean) => void) => cb(true));
   });
 
   window.addEventListener('appinstalled', () => {
-    console.log('[PWA] App installed successfully!');
-    deferredPrompt = null;
-    installCallbacks.forEach(cb => cb(false));
+    console.log('[PWA] ✅ App installed successfully!');
+    (window as any).__pwaInstallPrompt = null;
     localStorage.setItem('pwa-installed', 'true');
     localStorage.setItem('pwa-installed-at', Date.now().toString());
+
+    const cbs = (window as any).__pwaInstallCallbacks || [];
+    cbs.forEach((cb: (v: boolean) => void) => cb(false));
   });
 }
 
+// Call immediately on module load — earliest possible moment
+captureInstallPrompt();
+
+export function setupInstallPrompt(callback: (canInstall: boolean) => void) {
+  if (!(window as any).__pwaInstallCallbacks) {
+    (window as any).__pwaInstallCallbacks = [];
+  }
+  (window as any).__pwaInstallCallbacks.push(callback);
+
+  // If prompt was already captured before this callback was added
+  if ((window as any).__pwaInstallPrompt) {
+    callback(true);
+  }
+}
+
+export function onInstallChange(callback: (canInstall: boolean) => void) {
+  setupInstallPrompt(callback);
+}
+
 export async function promptInstall(): Promise<boolean> {
-  if (!deferredPrompt) {
-    console.log('[PWA] No install prompt available');
+  // FIXED: Use the global window reference that is SET by the global listener
+  const prompt = (window as any).__pwaInstallPrompt;
+  if (!prompt) {
+    console.log('[PWA] ❌ No install prompt available (beforeinstallprompt never fired)');
+    console.log('[PWA] This can mean: manifest issue, no SW, or browser doesn\'t support it');
     return false;
   }
 
   try {
-    deferredPrompt.prompt();
-    const { outcome } = await deferredPrompt.userChoice;
+    console.log('[PWA] Triggering install prompt...');
+    prompt.prompt();
+    const { outcome } = await prompt.userChoice;
     console.log('[PWA] Install outcome:', outcome);
-    deferredPrompt = null;
+    (window as any).__pwaInstallPrompt = null;
     return outcome === 'accepted';
   } catch (error) {
     console.error('[PWA] Install prompt error:', error);
@@ -82,7 +111,7 @@ export async function promptInstall(): Promise<boolean> {
 }
 
 export function canPromptInstall(): boolean {
-  return !!deferredPrompt;
+  return !!(window as any).__pwaInstallPrompt;
 }
 
 export function isStandalone(): boolean {
@@ -113,7 +142,7 @@ export function getBrowser(): 'chrome' | 'safari' | 'firefox' | 'edge' | 'samsun
   const ua = navigator.userAgent || '';
   if (/SamsungBrowser/.test(ua)) return 'samsung';
   if (/Edg\//.test(ua)) return 'edge';
-  if (/Chrome/.test(ua) && !/Edg/.test(ua)) return 'chrome';
+  if (/Chrome/.test(ua) && !/Edg/.test(ua) && !/SamsungBrowser/.test(ua)) return 'chrome';
   if (/Safari/.test(ua) && !/Chrome/.test(ua)) return 'safari';
   if (/Firefox/.test(ua)) return 'firefox';
   return 'other';
@@ -125,55 +154,32 @@ export function canAutoPrompt(): boolean {
   return ['chrome', 'edge', 'samsung'].includes(browser);
 }
 
-// ═══ PUSH NOTIFICATIONS ═══
+// ═══ PUSH NOTIFICATIONS (FIXED: robust error handling + retry) ═══
 export async function requestNotificationPermission(): Promise<NotificationPermission> {
   if (!('Notification' in window)) {
-    console.log('[PWA] Notifications not supported');
+    console.log('[PWA] Notifications not supported in this browser');
     return 'denied';
   }
 
   if (Notification.permission === 'granted') return 'granted';
-
-  const permission = await Notification.requestPermission();
-  console.log('[PWA] Notification permission:', permission);
-  return permission;
-}
-
-export async function subscribeToPush(registration: ServiceWorkerRegistration): Promise<PushSubscription | null> {
-  if (!('PushManager' in window)) {
-    console.log('[PWA] Push not supported');
-    return null;
+  if (Notification.permission === 'denied') {
+    console.log('[PWA] Notifications were previously denied by user');
+    return 'denied';
   }
 
   try {
-    let subscription = await registration.pushManager.getSubscription();
-    if (subscription) {
-      console.log('[PWA] Already subscribed to push');
-      return subscription;
-    }
-
-    const vapidKey = await getServerVapidKey();
-    if (!vapidKey) {
-      console.log('[PWA] No VAPID key available');
-      return null;
-    }
-
-    subscription = await registration.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(vapidKey),
-    });
-
-    console.log('[PWA] Push subscription created');
-    return subscription;
-  } catch (error) {
-    console.log('[PWA] Push subscription failed:', error);
-    return null;
+    const permission = await Notification.requestPermission();
+    console.log('[PWA] Notification permission result:', permission);
+    return permission;
+  } catch (e) {
+    console.error('[PWA] Error requesting notification permission:', e);
+    return 'denied';
   }
 }
 
 async function getServerVapidKey(): Promise<string | null> {
   try {
-    const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+    console.log('[PWA] Fetching VAPID key from server...');
     const res = await fetch(
       `https://${projectId}.supabase.co/functions/v1/make-server-42377006/push/vapid-key`,
       {
@@ -183,27 +189,120 @@ async function getServerVapidKey(): Promise<string | null> {
         },
       }
     );
+    if (!res.ok) {
+      console.error('[PWA] VAPID key request failed:', res.status, await res.text());
+      return null;
+    }
     const data = await res.json();
-    if (data.success && data.publicKey) return data.publicKey;
+    if (data.success && data.publicKey) {
+      console.log('[PWA] ✅ VAPID key received:', data.publicKey.substring(0, 20) + '...');
+      return data.publicKey;
+    }
+    console.error('[PWA] VAPID key response missing publicKey:', data);
     return null;
   } catch (e) {
-    console.error('[PWA] Failed to get VAPID key:', e);
+    console.error('[PWA] Failed to get VAPID key from server:', e);
+    return null;
+  }
+}
+
+export async function subscribeToPush(registration: ServiceWorkerRegistration): Promise<PushSubscription | null> {
+  if (!('PushManager' in window)) {
+    console.log('[PWA] PushManager not supported in this browser');
+    return null;
+  }
+
+  try {
+    // Check for existing subscription first
+    let subscription = await registration.pushManager.getSubscription();
+    if (subscription) {
+      console.log('[PWA] ✅ Existing push subscription found');
+      return subscription;
+    }
+
+    const vapidKey = await getServerVapidKey();
+    if (!vapidKey) {
+      console.error('[PWA] ❌ Cannot subscribe to push — no VAPID key');
+      return null;
+    }
+
+    console.log('[PWA] Creating new push subscription...');
+    subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(vapidKey),
+    });
+
+    console.log('[PWA] ✅ Push subscription created successfully');
+    console.log('[PWA] Endpoint:', subscription.endpoint.substring(0, 60) + '...');
+    return subscription;
+  } catch (error: any) {
+    console.error('[PWA] ❌ Push subscription failed:', error.message || error);
+    if (error.message?.includes('permission')) {
+      console.log('[PWA] Hint: User needs to grant notification permission first');
+    }
     return null;
   }
 }
 
 export async function registerPushSubscription(username: string): Promise<boolean> {
+  console.log(`[PWA] === Starting push registration for: ${username} ===`);
+
   try {
-    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return false;
+    // Step 1: Check browser support
+    if (!('serviceWorker' in navigator)) {
+      console.error('[PWA] ❌ Step 1 FAIL: ServiceWorker not supported');
+      return false;
+    }
+    if (!('PushManager' in window)) {
+      console.error('[PWA] ❌ Step 1 FAIL: PushManager not supported');
+      return false;
+    }
+    console.log('[PWA] ✅ Step 1: Browser supports SW + Push');
 
+    // Step 2: Request notification permission
     const permission = await requestNotificationPermission();
-    if (permission !== 'granted') return false;
+    if (permission !== 'granted') {
+      console.error(`[PWA] ❌ Step 2 FAIL: Notification permission is "${permission}"`);
+      return false;
+    }
+    console.log('[PWA] ✅ Step 2: Notification permission granted');
 
-    const registration = await navigator.serviceWorker.ready;
-    const subscription = await subscribeToPush(registration);
-    if (!subscription) return false;
+    // Step 3: Wait for SW to be ready (with timeout)
+    console.log('[PWA] Step 3: Waiting for Service Worker to be ready...');
+    const registration = await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 10000)),
+    ]) as ServiceWorkerRegistration | null;
 
-    const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+    if (!registration) {
+      console.error('[PWA] ❌ Step 3 FAIL: Service Worker not ready after 10s');
+      // Try to register it now
+      console.log('[PWA] Attempting emergency SW registration...');
+      const emergencyReg = await registerServiceWorker();
+      if (!emergencyReg) {
+        console.error('[PWA] ❌ Emergency SW registration also failed');
+        return false;
+      }
+      console.log('[PWA] ✅ Emergency SW registered, waiting for it to activate...');
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    const finalReg = registration || await navigator.serviceWorker.ready;
+    console.log('[PWA] ✅ Step 3: Service Worker ready');
+
+    // Step 4: Subscribe to push
+    const subscription = await subscribeToPush(finalReg);
+    if (!subscription) {
+      console.error('[PWA] ❌ Step 4 FAIL: Could not create push subscription');
+      return false;
+    }
+    console.log('[PWA] ✅ Step 4: Push subscription obtained');
+
+    // Step 5: Send subscription to server
+    console.log('[PWA] Step 5: Sending subscription to server...');
+    const subJSON = subscription.toJSON();
+    console.log('[PWA] Subscription JSON keys:', Object.keys(subJSON));
+
     const res = await fetch(
       `https://${projectId}.supabase.co/functions/v1/make-server-42377006/push/subscribe`,
       {
@@ -212,19 +311,24 @@ export async function registerPushSubscription(username: string): Promise<boolea
           'Authorization': `Bearer ${publicAnonKey}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ username, subscription: subscription.toJSON() }),
+        body: JSON.stringify({ username, subscription: subJSON }),
       }
     );
+
     const data = await res.json();
+    console.log('[PWA] Server response:', data);
 
     if (data.success) {
-      console.log(`[PWA] Push registered for ${username}`);
+      console.log(`[PWA] ✅✅✅ Push FULLY registered for ${username} (${data.deviceCount} devices)`);
       localStorage.setItem('push-registered-user', username);
+      localStorage.setItem('push-registered-at', Date.now().toString());
       return true;
     }
+
+    console.error('[PWA] ❌ Step 5 FAIL: Server rejected subscription:', data.error);
     return false;
   } catch (error) {
-    console.error('[PWA] Error registering push:', error);
+    console.error('[PWA] ❌ CRITICAL Error registering push:', error);
     return false;
   }
 }
@@ -235,7 +339,6 @@ export async function unregisterPushSubscription(username: string): Promise<void
     const subscription = await registration.pushManager.getSubscription();
 
     if (subscription) {
-      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
       await fetch(
         `https://${projectId}.supabase.co/functions/v1/make-server-42377006/push/unsubscribe`,
         {
@@ -283,7 +386,7 @@ export async function showLocalNotification(
     return;
   }
 
-  if (Notification.permission === 'granted') {
+  if ('Notification' in window && Notification.permission === 'granted') {
     new Notification(title, {
       body,
       icon: '/icons/icon.svg',
@@ -608,77 +711,13 @@ export function generateSplashScreen(width: number, height: number): string {
   return canvas.toDataURL('image/png');
 }
 
-// ═══ DYNAMIC MANIFEST WITH PNG ICONS ═══
-export function createDynamicManifest() {
-  const sizes = [72, 96, 128, 144, 152, 192, 384, 512];
-  const icons = sizes.map((size) => ({
-    src: generateIcon(size),
-    sizes: `${size}x${size}`,
-    type: 'image/png',
-    purpose: 'any',
-  }));
+// ═══ SETUP ICONS AND META (WITHOUT touching manifest) ═══
+// FIXED: Do NOT replace the static /manifest.json with a blob URL!
+// Chrome evaluates the manifest at page load. Replacing it with blob URL
+// after page load causes beforeinstallprompt to NOT fire.
+// The static /public/manifest.json with SVG icons works perfectly.
 
-  // Add maskable versions
-  icons.push({
-    src: generateIcon(512),
-    sizes: '512x512',
-    type: 'image/png',
-    purpose: 'maskable',
-  });
-
-  const manifest = {
-    id: '/',
-    name: 'NeonDelivery - Sistema de Delivery',
-    short_name: 'NeonDelivery',
-    description: 'Sistema completo de delivery com design dark tech futurista',
-    start_url: '/?source=pwa',
-    scope: '/',
-    display: 'standalone',
-    display_override: ['standalone', 'minimal-ui'],
-    orientation: 'portrait',
-    theme_color: '#00f0ff',
-    background_color: '#0a0a0f',
-    categories: ['business', 'food', 'shopping'],
-    lang: 'pt-BR',
-    prefer_related_applications: false,
-    icons,
-    shortcuts: [
-      {
-        name: 'Login',
-        short_name: 'Login',
-        url: '/?source=shortcut',
-        icons: [{ src: generateIcon(96), sizes: '96x96', type: 'image/png' }],
-      },
-    ],
-    launch_handler: {
-      client_mode: 'navigate-existing',
-    },
-  };
-
-  // Create blob URL for manifest
-  const blob = new Blob([JSON.stringify(manifest)], { type: 'application/manifest+json' });
-  const manifestUrl = URL.createObjectURL(blob);
-
-  // Replace or create manifest link
-  let manifestLink = document.querySelector<HTMLLinkElement>('link[rel="manifest"]');
-  if (manifestLink) {
-    manifestLink.href = manifestUrl;
-  } else {
-    manifestLink = document.createElement('link');
-    manifestLink.rel = 'manifest';
-    manifestLink.href = manifestUrl;
-    document.head.appendChild(manifestLink);
-  }
-
-  console.log('[PWA] Dynamic manifest with PNG icons created');
-  return manifestUrl;
-}
-
-// ═══ SETUP ALL PWA META TAGS AND ICONS ═══
 export function generateAndCacheIcons() {
-  // Generate dynamic manifest with PNG icons
-  createDynamicManifest();
-
   // Favicon
   const faviconUrl = generateIcon(32);
   let favicon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
@@ -716,23 +755,30 @@ export function generateAndCacheIcons() {
     }
   });
 
-  // iOS Splash screens
-  const splashConfigs = [
-    { w: 1170, h: 2532, media: '(device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3)' }, // iPhone 12/13/14
-    { w: 1284, h: 2778, media: '(device-width: 428px) and (device-height: 926px) and (-webkit-device-pixel-ratio: 3)' }, // iPhone 12/13/14 Pro Max
-    { w: 1179, h: 2556, media: '(device-width: 393px) and (device-height: 852px) and (-webkit-device-pixel-ratio: 3)' }, // iPhone 15 Pro
-    { w: 1290, h: 2796, media: '(device-width: 430px) and (device-height: 932px) and (-webkit-device-pixel-ratio: 3)' }, // iPhone 15 Pro Max
-    { w: 750, h: 1334, media: '(device-width: 375px) and (device-height: 667px) and (-webkit-device-pixel-ratio: 2)' },  // iPhone 8
-    { w: 1125, h: 2436, media: '(device-width: 375px) and (device-height: 812px) and (-webkit-device-pixel-ratio: 3)' }, // iPhone X/XS
-    { w: 828, h: 1792, media: '(device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 2)' },  // iPhone XR/11
-    { w: 1242, h: 2688, media: '(device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 3)' }, // iPhone XS Max/11 Pro Max
-    { w: 1668, h: 2388, media: '(device-width: 834px) and (device-height: 1194px) and (-webkit-device-pixel-ratio: 2)' }, // iPad Pro 11"
-    { w: 2048, h: 2732, media: '(device-width: 1024px) and (device-height: 1366px) and (-webkit-device-pixel-ratio: 2)' }, // iPad Pro 12.9"
-  ];
+  // Ensure static manifest link exists
+  let manifestLink = document.querySelector<HTMLLinkElement>('link[rel="manifest"]');
+  if (!manifestLink) {
+    manifestLink = document.createElement('link');
+    manifestLink.rel = 'manifest';
+    manifestLink.href = '/manifest.json';
+    document.head.appendChild(manifestLink);
+  }
 
-  // Generate splash screens lazily (only for iOS)
+  // iOS Splash screens
   if (getPlatform() === 'ios') {
-    // Only generate for current device to save memory
+    const splashConfigs = [
+      { w: 1170, h: 2532, media: '(device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3)' },
+      { w: 1284, h: 2778, media: '(device-width: 428px) and (device-height: 926px) and (-webkit-device-pixel-ratio: 3)' },
+      { w: 1179, h: 2556, media: '(device-width: 393px) and (device-height: 852px) and (-webkit-device-pixel-ratio: 3)' },
+      { w: 1290, h: 2796, media: '(device-width: 430px) and (device-height: 932px) and (-webkit-device-pixel-ratio: 3)' },
+      { w: 750, h: 1334, media: '(device-width: 375px) and (device-height: 667px) and (-webkit-device-pixel-ratio: 2)' },
+      { w: 1125, h: 2436, media: '(device-width: 375px) and (device-height: 812px) and (-webkit-device-pixel-ratio: 3)' },
+      { w: 828, h: 1792, media: '(device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 2)' },
+      { w: 1242, h: 2688, media: '(device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 3)' },
+      { w: 1668, h: 2388, media: '(device-width: 834px) and (device-height: 1194px) and (-webkit-device-pixel-ratio: 2)' },
+      { w: 2048, h: 2732, media: '(device-width: 1024px) and (device-height: 1366px) and (-webkit-device-pixel-ratio: 2)' },
+    ];
+
     const dpr = window.devicePixelRatio || 1;
     const screenW = Math.round(window.screen.width * dpr);
     const screenH = Math.round(window.screen.height * dpr);
@@ -750,7 +796,6 @@ export function generateAndCacheIcons() {
       document.head.appendChild(link);
       console.log('[PWA] iOS splash screen generated for', matchingConfig.w, 'x', matchingConfig.h);
     } else {
-      // Fallback: generate a generic splash
       const splashUrl = generateSplashScreen(screenW || 1170, screenH || 2532);
       const link = document.createElement('link');
       link.rel = 'apple-touch-startup-image';
@@ -760,5 +805,5 @@ export function generateAndCacheIcons() {
     }
   }
 
-  console.log('[PWA] All icons and meta tags configured');
+  console.log('[PWA] Icons and meta tags configured (manifest left as static)');
 }

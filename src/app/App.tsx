@@ -51,36 +51,39 @@ export default function App() {
 
     // ═══ PWA INITIALIZATION ═══
     const initPWA = async () => {
-      console.log("[PWA] Inicializando PWA completa...");
+      console.log("[PWA] Inicializando PWA v4...");
       const platform = getPlatform();
       console.log("[PWA] Plataforma:", platform);
 
-      // 1. Generate icons, splash screens, and dynamic manifest with PNG icons
+      // 1. Generate icons and apple-touch-icon (static manifest.json is preserved)
       generateAndCacheIcons();
 
       // 2. Add all PWA meta tags
       addPWAMetaTags();
 
-      // 3. Register Service Worker
+      // 3. Register Service Worker (FIXED: removed strict content-type check)
       const registration = await registerServiceWorker();
       if (registration) {
-        console.log("[PWA] Service Worker v3 registrado");
+        console.log("[PWA] Service Worker v4 registrado");
 
-        // 4. Request notification permission after a delay
+        // 4. Auto-register push for logged-in user with retry
+        // FIXED: More robust push registration with explicit steps logging
         setTimeout(async () => {
-          const perms = await checkPermissions();
-          if (perms.notifications === "prompt") {
-            await requestNotificationPermission();
-          }
-
-          // Auto-register push for logged-in user
           const currentUser = localStorage.getItem("currentUser");
           if (currentUser) {
             try {
               const userData = JSON.parse(currentUser);
               if (userData.username) {
-                console.log("[PWA] Auto-registering push for:", userData.username);
-                await registerPushSubscription(userData.username);
+                console.log("[PWA] === Auto-registering push for:", userData.username, "===");
+                const success = await registerPushSubscription(userData.username);
+                if (!success) {
+                  // Retry once after 5 seconds
+                  console.log("[PWA] First push registration attempt failed, retrying in 5s...");
+                  setTimeout(async () => {
+                    const retrySuccess = await registerPushSubscription(userData.username);
+                    console.log("[PWA] Push retry result:", retrySuccess);
+                  }, 5000);
+                }
               }
             } catch (e) {
               console.log("[PWA] Could not auto-register push:", e);
@@ -98,9 +101,11 @@ export default function App() {
             urls: ['/', '/manifest.json', '/icons/icon.svg'],
           });
         }
+      } else {
+        console.log("[PWA] Service Worker nao registrado — push nao disponivel");
       }
 
-      // 7. Setup install prompt listener
+      // 7. Setup install prompt callback (listener already exists from module load)
       setupInstallPrompt((canInstall) => {
         console.log(
           canInstall
@@ -194,13 +199,12 @@ function addPWAMetaTags() {
   setMeta("og:description", "Sistema completo de delivery com design neon", true);
   setMeta("og:type", "website", true);
 
-  // Manifest link (will be replaced by dynamic manifest from pwa.ts)
+  // Manifest link (static — DO NOT replace with blob URL)
   let manifest = head.querySelector('link[rel="manifest"]');
   if (!manifest) {
     manifest = document.createElement("link");
     manifest.setAttribute("rel", "manifest");
     manifest.setAttribute("href", "/manifest.json");
-    manifest.setAttribute("crossorigin", "use-credentials");
     head.appendChild(manifest);
   }
 

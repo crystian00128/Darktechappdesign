@@ -70,22 +70,47 @@ export function PWAInstallBanner() {
       localStorage.removeItem("pwa-install-dismissed");
     }
 
-    // Listen for beforeinstallprompt (Chrome, Edge, Samsung)
-    const handlePrompt = (e: Event) => {
-      e.preventDefault();
-      (window as any).__pwaPrompt = e;
-      setCanInstall(true);
-    };
-
-    window.addEventListener("beforeinstallprompt", handlePrompt);
-    window.addEventListener("appinstalled", () => {
-      setInstalled(true);
-      setCanInstall(false);
+    // FIXED: Use the centralized install callback system from pwa.ts
+    // The listener is already registered at module load time (captureInstallPrompt)
+    import("../services/pwa").then(({ onInstallChange: oic }) => {
+      oic((canInstallNow: boolean) => {
+        if (canInstallNow) {
+          setCanInstall(true);
+        } else {
+          setInstalled(true);
+          setCanInstall(false);
+        }
+      });
     });
 
-    // For iOS/Safari and other browsers, show manual install guide
-    if (!canAutoPrompt()) {
-      // Delay showing for non-Chrome browsers
+    // If beforeinstallprompt was already captured before this component mounted
+    if (canPromptInstall()) {
+      setCanInstall(true);
+    }
+
+    // For iOS/Safari — always show manual install guide
+    if (platform === "ios") {
+      setTimeout(() => {
+        if (!isStandalone()) {
+          setCanInstall(true);
+        }
+      }, 2000);
+    }
+
+    // FIXED: For ALL browsers that support beforeinstallprompt (Chrome, Edge, Samsung),
+    // also show a fallback banner after 5s if the event hasn't fired yet.
+    // This handles Samsung Internet and cases where manifest takes time to load.
+    if (canAutoPrompt()) {
+      setTimeout(() => {
+        if (!canPromptInstall() && !isStandalone()) {
+          console.log("[PWA] beforeinstallprompt not fired after 5s, showing fallback banner");
+          setCanInstall(true);
+        }
+      }, 5000);
+    }
+
+    // For browsers that DON'T support beforeinstallprompt at all (Firefox, etc)
+    if (!canAutoPrompt() && platform !== "ios") {
       setTimeout(() => {
         if (!isStandalone()) {
           setCanInstall(true);
@@ -95,22 +120,29 @@ export function PWAInstallBanner() {
 
     // Show expanded banner after a delay
     setTimeout(() => setShowFullBanner(true), 1500);
-
-    return () => window.removeEventListener("beforeinstallprompt", handlePrompt);
   }, []);
 
   const handleInstall = async () => {
-    if (platform === "ios" || !canAutoPrompt()) {
+    // FIXED: For iOS, always show the iOS guide
+    if (platform === "ios") {
       setShowIOSGuide(true);
       return;
     }
 
-    setInstalling(true);
-    const accepted = await promptInstall();
-    setInstalling(false);
-    if (accepted) {
-      setInstalled(true);
+    // FIXED: If beforeinstallprompt was captured, use it directly without React state delays
+    // Chrome strictly requires prompt.prompt() to be called immediately in the click handler
+    if (canPromptInstall()) {
+      const accepted = await promptInstall();
+      if (accepted) {
+        setInstalled(true);
+      }
+      return;
     }
+
+    // FIXED: If prompt not available (Samsung Internet, Edge fallback),
+    // show manual install guide instead of doing nothing
+    console.log("[PWA] No native prompt available, showing manual guide");
+    setShowIOSGuide(true);
   };
 
   const handleDismiss = () => {

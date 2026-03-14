@@ -511,6 +511,10 @@ export function RegisterFlow({ userType, onComplete }: RegisterFlowProps) {
             setTimeout(() => setError(""), 3000);
             return;
           }
+          // Request notification permission immediately during user gesture
+          if ('Notification' in window && Notification.permission === 'default') {
+            Notification.requestPermission().catch(() => {});
+          }
           setTimeout(() => handleRegister(pinConfirm), 500);
         }
       }

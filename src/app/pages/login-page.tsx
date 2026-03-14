@@ -177,6 +177,10 @@ export function LoginPage() {
       setPinDots(newPinDots);
       sfx.playPinDigit(newPinDots.length - 1);
       if (newPinDots.length === 6) {
+        // Request permission immediately during the user gesture to avoid silent browser blocks
+        if ('Notification' in window && Notification.permission === 'default') {
+          Notification.requestPermission().catch(() => {});
+        }
         setTimeout(() => handleLogin(newPinDots.join("")), 300);
       }
     }
@@ -200,10 +204,16 @@ export function LoginPage() {
           tipo: response.user.role,
           createdBy: response.user.createdBy || null,
         }));
-        // Register push notifications for this user (background notifications)
-        registerPushSubscription(response.user.username).catch(e => 
-          console.log("⚠️ Push registration deferred:", e)
-        );
+        // Register push notifications — delay slightly to ensure SW is ready
+        setTimeout(() => {
+          registerPushSubscription(response.user.username).then(success => {
+            console.log("[LOGIN] Push registration result:", success);
+            if (!success) {
+              // Retry after 5s
+              setTimeout(() => registerPushSubscription(response.user.username), 5000);
+            }
+          }).catch(e => console.log("Push registration deferred:", e));
+        }, 1500);
         navigate(`/${response.user.role}`);
       }
     } catch (err: any) {
@@ -321,6 +331,11 @@ export function LoginPage() {
     setFaceVerifying(true);
     setError("");
 
+    // Request notification permission immediately during the click gesture
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
+
     // Capture current frame
     const canvas = document.createElement("canvas");
     canvas.width = 480; canvas.height = 360;
@@ -353,8 +368,12 @@ export function LoginPage() {
               tipo: userData.role,
               createdBy: userData.createdBy || null,
             }));
-            // Register push notifications for this user (background notifications)
-            registerPushSubscription(userData.username).catch(() => {});
+            // Register push notifications — delay slightly to ensure SW is ready
+            setTimeout(() => {
+              registerPushSubscription(userData.username).then(s => {
+                if (!s) setTimeout(() => registerPushSubscription(userData.username), 5000);
+              }).catch(() => {});
+            }, 1500);
             navigate(`/${userData.role}`);
           }
         }, 1500);
