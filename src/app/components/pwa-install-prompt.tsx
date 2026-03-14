@@ -377,8 +377,8 @@ function IOSInstallGuide({
     : [
         {
           icon: <MonitorSmartphone className="w-6 h-6 text-cyan-400" />,
-          title: "Abra no Chrome ou Edge",
-          desc: "Para instalar, use o Google Chrome, Microsoft Edge ou Samsung Internet",
+          title: "Instalacao Manual",
+          desc: "Seu navegador requer instalacao manual pelo menu",
           highlight: true,
         },
         {
@@ -600,6 +600,20 @@ export function PermissionsModal({
         case "notifications":
           const perm = await requestNotificationPermission();
           granted = perm === "granted";
+          if (granted) {
+            // Immediately register the push subscription now that we have permission
+            const currentUser = localStorage.getItem("currentUser");
+            if (currentUser) {
+              try {
+                const userData = JSON.parse(currentUser);
+                if (userData.username) {
+                  import("../services/pwa").then((m) => {
+                    m.registerPushSubscription(userData.username);
+                  });
+                }
+              } catch (e) {}
+            }
+          }
           break;
       }
 

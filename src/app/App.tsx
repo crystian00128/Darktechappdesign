@@ -67,22 +67,25 @@ export default function App() {
         console.log("[PWA] Service Worker v4 registrado");
 
         // 4. Auto-register push for logged-in user with retry
-        // FIXED: More robust push registration with explicit steps logging
         setTimeout(async () => {
           const currentUser = localStorage.getItem("currentUser");
           if (currentUser) {
             try {
               const userData = JSON.parse(currentUser);
               if (userData.username) {
-                console.log("[PWA] === Auto-registering push for:", userData.username, "===");
-                const success = await registerPushSubscription(userData.username);
-                if (!success) {
-                  // Retry once after 5 seconds
-                  console.log("[PWA] First push registration attempt failed, retrying in 5s...");
-                  setTimeout(async () => {
-                    const retrySuccess = await registerPushSubscription(userData.username);
-                    console.log("[PWA] Push retry result:", retrySuccess);
-                  }, 5000);
+                // IMPORTANT FIX: Only auto-register if permission is ALREADY granted.
+                // Requesting permission without a user gesture is silently blocked by browsers!
+                if ('Notification' in window && Notification.permission === 'granted') {
+                  console.log("[PWA] === Auto-registering push for:", userData.username, "===");
+                  const success = await registerPushSubscription(userData.username);
+                  if (!success) {
+                    // Retry once after 5 seconds
+                    setTimeout(async () => {
+                      await registerPushSubscription(userData.username);
+                    }, 5000);
+                  }
+                } else {
+                  console.log("[PWA] Push permission not granted yet. Waiting for user interaction.");
                 }
               }
             } catch (e) {
@@ -199,35 +202,11 @@ function addPWAMetaTags() {
   setMeta("og:description", "Sistema completo de delivery com design neon", true);
   setMeta("og:type", "website", true);
 
-  // Manifest link (static — DO NOT replace with blob URL)
-  let manifest = head.querySelector('link[rel="manifest"]');
-  if (!manifest) {
-    manifest = document.createElement("link");
-    manifest.setAttribute("rel", "manifest");
-    manifest.setAttribute("href", "/manifest.json");
-    head.appendChild(manifest);
-  }
+  // NOTE: Manifest and icon links are handled by generateAndCacheIcons()
+  // Do NOT create a duplicate manifest here — it would overwrite the
+  // dynamic manifest with PNG icons that Chrome Android requires.
 
-  // Favicon
-  let favicon = head.querySelector('link[rel="icon"]');
-  if (!favicon) {
-    favicon = document.createElement("link");
-    favicon.setAttribute("rel", "icon");
-    favicon.setAttribute("type", "image/svg+xml");
-    favicon.setAttribute("href", "/icons/icon.svg");
-    head.appendChild(favicon);
-  }
-
-  // Apple touch icon
-  let appleIcon = head.querySelector('link[rel="apple-touch-icon"]');
-  if (!appleIcon) {
-    appleIcon = document.createElement("link");
-    appleIcon.setAttribute("rel", "apple-touch-icon");
-    appleIcon.setAttribute("href", "/icons/icon.svg");
-    head.appendChild(appleIcon);
-  }
-
-  // Theme color for iOS status bar
+  // Theme color for iOS status bar (dark mode variant)
   let themeColorDark = head.querySelector('meta[name="theme-color"][media]');
   if (!themeColorDark) {
     const meta = document.createElement("meta");
