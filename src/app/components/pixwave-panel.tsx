@@ -157,7 +157,7 @@ export function PixwavePanel() {
     try {
       const res = await api.createPixwaveInvoice({
         description: "Teste de Integração PixWave",
-        price: 1.00,
+        price: 10.00,
         externalId: `test-${Date.now()}`,
         metadata: { test: true },
       });
@@ -343,7 +343,7 @@ export function PixwavePanel() {
               ) : (
                 <QrCode className="w-3.5 h-3.5 text-[#00f0ff]" />
               )}
-              {creatingTest ? "Criando..." : "Criar Invoice Teste (R$ 1,00)"}
+              {creatingTest ? "Criando..." : "Criar Invoice Teste (R$ 10,00)"}
             </motion.button>
             <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
               onClick={loadDashboard} disabled={loadingDash}

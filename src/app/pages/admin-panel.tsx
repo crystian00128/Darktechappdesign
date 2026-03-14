@@ -29,11 +29,15 @@ import {
   Minus,
   Plus,
   Loader2,
+  Smartphone,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import * as api from "../services/api";
 import * as sfx from "../services/sounds";
 import { PixwavePanel } from "../components/pixwave-panel";
+import { AdminDashboardCharts, AdminFaturamentoCharts } from "../components/admin-charts";
+import * as notif from "../services/notifications";
+import { PWADiagnosticsPanel } from "../components/pwa-diagnostics";
 
 // Neon glow text component
 function NeonText({ children, color = "#00f0ff", className = "" }: { children: React.ReactNode; color?: string; className?: string }) {
@@ -200,6 +204,7 @@ export function AdminPanel() {
     { icon: <Shield className="w-5 h-5" />, label: "Seguranca", id: "seguranca" },
     { icon: <Key className="w-5 h-5" />, label: "API", id: "api" },
     { icon: <TrendingUp className="w-5 h-5" />, label: "Faturamento", id: "faturamento" },
+    { icon: <Smartphone className="w-5 h-5" />, label: "PWA", id: "pwa" },
   ];
 
   const copyToClipboard = (text: string) => {
@@ -228,6 +233,7 @@ export function AdminPanel() {
       if (response.success) {
         sfx.playCodeAccepted();
         copyToClipboard(response.code.code);
+        notif.notifyCodeGenerated(response.code.code);
         await loadHierarchy();
       }
     } catch (error) {
@@ -387,106 +393,8 @@ export function AdminPanel() {
             </GlowCard>
           </div>
 
-          {/* Charts */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <GlowCard>
-              <div className="p-4">
-                <h3 className="text-white font-bold text-base mb-4">
-                  <NeonText>Vendas Mensais</NeonText>
-                </h3>
-                <div className="h-[200px] flex items-center justify-center">
-                  <div className="text-center">
-                    <motion.div
-                      animate={{ opacity: [0.3, 0.6, 0.3] }}
-                      transition={{ duration: 3, repeat: Infinity }}
-                    >
-                      <ShoppingBag className="w-8 h-8 text-gray-700 mx-auto mb-2" />
-                    </motion.div>
-                    <p className="text-gray-600 text-xs">Nenhum dado disponivel</p>
-                  </div>
-                </div>
-              </div>
-            </GlowCard>
-
-            <GlowCard glowColor="#ff00ff">
-              <div className="p-4">
-                <h3 className="text-white font-bold text-base mb-4">
-                  <NeonText color="#ff00ff">Comparativo Vendedores</NeonText>
-                </h3>
-                {vendedores.length > 0 ? (
-                  <div className="h-[200px] flex flex-col justify-end">
-                    <div className="flex items-center gap-3 mb-3">
-                      <div className="flex items-center gap-1">
-                        <div className="w-2.5 h-2.5 rounded-sm bg-[#00f0ff]" />
-                        <span className="text-gray-500 text-[10px]">Clientes</span>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <div className="w-2.5 h-2.5 rounded-sm bg-[#ff00ff]" />
-                        <span className="text-gray-500 text-[10px]">Motoristas</span>
-                      </div>
-                    </div>
-                    <div className="flex-1 flex items-end gap-2 overflow-x-auto pb-1">
-                      {vendedores.map((v: any, idx: number) => {
-                        const clientes = v.stats?.totalClientes || 0;
-                        const motoristas = v.stats?.totalMotoristas || 0;
-                        const maxVal = Math.max(1, ...vendedores.map((vv: any) => Math.max(vv.stats?.totalClientes || 0, vv.stats?.totalMotoristas || 0)));
-                        return (
-                          <div key={`bar-${v.username}-${idx}`} className="flex-1 min-w-[44px] flex flex-col items-center gap-0.5">
-                            <div className="flex items-end gap-1 w-full justify-center" style={{ height: "120px" }}>
-                              <motion.div
-                                initial={{ height: 0 }}
-                                animate={{ height: `${Math.max(8, (clientes / maxVal) * 100)}%` }}
-                                transition={{ duration: 0.6, delay: idx * 0.1 }}
-                                className="w-5 rounded-t-lg relative group"
-                                style={{ background: "linear-gradient(to top, #00f0ff80, #00f0ff)" }}
-                                title={`Clientes: ${clientes}`}
-                              >
-                                <motion.div
-                                  className="absolute inset-0 rounded-t-lg"
-                                  animate={{ boxShadow: ["0 0 4px rgba(0,240,255,0.3)", "0 0 10px rgba(0,240,255,0.5)", "0 0 4px rgba(0,240,255,0.3)"] }}
-                                  transition={{ duration: 2, repeat: Infinity }}
-                                />
-                                <div className="absolute -top-5 left-1/2 -translate-x-1/2 text-[#00f0ff] text-[9px] font-bold opacity-0 group-hover:opacity-100 transition-opacity">
-                                  {clientes}
-                                </div>
-                              </motion.div>
-                              <motion.div
-                                initial={{ height: 0 }}
-                                animate={{ height: `${Math.max(8, (motoristas / maxVal) * 100)}%` }}
-                                transition={{ duration: 0.6, delay: idx * 0.1 + 0.05 }}
-                                className="w-5 rounded-t-lg relative group"
-                                style={{ background: "linear-gradient(to top, #ff00ff80, #ff00ff)" }}
-                                title={`Motoristas: ${motoristas}`}
-                              >
-                                <motion.div
-                                  className="absolute inset-0 rounded-t-lg"
-                                  animate={{ boxShadow: ["0 0 4px rgba(255,0,255,0.3)", "0 0 10px rgba(255,0,255,0.5)", "0 0 4px rgba(255,0,255,0.3)"] }}
-                                  transition={{ duration: 2, repeat: Infinity, delay: 0.5 }}
-                                />
-                                <div className="absolute -top-5 left-1/2 -translate-x-1/2 text-[#ff00ff] text-[9px] font-bold opacity-0 group-hover:opacity-100 transition-opacity">
-                                  {motoristas}
-                                </div>
-                              </motion.div>
-                            </div>
-                            <div className="border-t border-[#1f1f2e] w-full pt-0.5">
-                              <p className="text-gray-500 text-[10px] text-center truncate">{v.name || v.username || `V${idx + 1}`}</p>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="h-[200px] flex items-center justify-center">
-                    <div className="text-center">
-                      <Users className="w-8 h-8 text-gray-700 mx-auto mb-2" />
-                      <p className="text-gray-600 text-xs">Nenhum vendedor</p>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </GlowCard>
-          </div>
+          {/* Charts - Real recharts */}
+          <AdminDashboardCharts />
         </motion.div>
       )}
 
@@ -1048,56 +956,17 @@ export function AdminPanel() {
 
       {/* ===================== FATURAMENTO ===================== */}
       {activeTab === "faturamento" && (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <StatCard title="Vendas Hoje" value={`R$ ${(metrics.todaySales || 0).toLocaleString()}`} icon={<DollarSign className="w-full h-full" />} color="cyan" />
-            <StatCard title="Taxa Admin" value={`R$ ${(metrics.adminTax || 0).toLocaleString()}`} icon={<TrendingUp className="w-full h-full" />} color="purple" />
-            <StatCard title="Total Vendas" value={`R$ ${(metrics.totalSales || 0).toLocaleString()}`} icon={<ShoppingBag className="w-full h-full" />} color="green" />
-          </div>
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+          <AdminFaturamentoCharts />
+        </motion.div>
+      )}
 
-          <GlowCard>
-            <div className="p-4">
-              <h2 className="text-white font-bold text-lg mb-3">
-                <NeonText>Detalhamento por Vendedor</NeonText>
-              </h2>
-              <div className="space-y-3">
-                {vendedores.length > 0 ? (
-                  vendedores.map((vendedor: any) => (
-                    <div key={vendedor.username} className="p-4 bg-[#0a0a12]/60 rounded-xl border border-[#1f1f2e]/40 space-y-2.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <NeonAvatar photo={vendedor.photo} name={vendedor.name} size="md" />
-                          <div className="min-w-0">
-                            <h3 className="text-white font-semibold text-sm truncate">{vendedor.name || "Vendedor"}</h3>
-                            <p className="text-gray-500 text-xs">@{vendedor.username}</p>
-                          </div>
-                        </div>
-                        <motion.span
-                          className="px-2 py-0.5 bg-[#00ff41]/10 text-[#00ff41] rounded-full text-[11px] font-medium border border-[#00ff41]/20 shrink-0"
-                          animate={{ boxShadow: ["0 0 4px rgba(0,255,65,0)", "0 0 8px rgba(0,255,65,0.3)", "0 0 4px rgba(0,255,65,0)"] }}
-                          transition={{ duration: 2, repeat: Infinity }}
-                        >
-                          Ativo
-                        </motion.span>
-                      </div>
-                      <div className="grid grid-cols-3 gap-3">
-                        {[
-                          { label: "Clientes", val: vendedor.stats?.totalClientes || 0, color: "#00f0ff" },
-                          { label: "Motoristas", val: vendedor.stats?.totalMotoristas || 0, color: "#ff00ff" },
-                          { label: "Codigos", val: (vendedor.codesGenerated?.cliente?.length || 0) + (vendedor.codesGenerated?.motorista?.length || 0), color: "#8b5cf6" },
-                        ].map((item) => (
-                          <div key={item.label} className="text-center bg-[#0c0c14]/60 rounded-lg p-2 border border-[#1f1f2e]/30">
-                            <p className="text-gray-500 text-[11px]">{item.label}</p>
-                            <NeonText color={item.color} className="text-base font-bold block">{item.val}</NeonText>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <p className="text-gray-600 text-center py-6 text-xs">Nenhum vendedor cadastrado</p>
-                )}
-              </div>
+      {/* ===================== PWA DIAGNOSTICS ===================== */}
+      {activeTab === "pwa" && (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+          <GlowCard glowColor="#8b5cf6">
+            <div className="p-5">
+              <PWADiagnosticsPanel />
             </div>
           </GlowCard>
         </motion.div>

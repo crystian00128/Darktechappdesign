@@ -7,12 +7,14 @@ import * as sfx from "../services/sounds";
 import { StatCard } from "../components/stat-card";
 import { useCallSystem } from "../hooks/useCallSystem";
 import { IncomingCallOverlay, ActiveCallOverlay } from "../components/call-overlays";
+import { VendedorDashboardCharts } from "../components/vendedor-charts";
+import * as notif from "../services/notifications";
 import {
   LayoutDashboard, MessageSquare, Package, FileText, Ticket, Wallet, Truck,
   DollarSign, ShoppingBag, TrendingUp, Copy, Check, Power, Plus, X, Users,
   ClipboardList, Trash2, Clock, CheckCircle2, UserPlus, RefreshCw, ArrowLeft,
   Shield, Zap, Send, ChevronLeft, CheckCheck, Mic, Phone, Video, Camera, Image as ImageIcon,
-  Paperclip, Play, Pause, Square, MicOff, PhoneOff, VideoOff, Maximize2, QrCode, Loader2, CircleDollarSign,
+  Paperclip, Play, Pause, Square, MicOff, PhoneOff, VideoOff, Maximize2, QrCode, Loader2,
 } from "lucide-react";
 
 // ─── Shared Neon Components ─────────────────────────────────────────
@@ -1037,7 +1039,7 @@ export function VendedorPanel() {
   ];
 
   const handleGenerateCode = async (type: "cliente" | "motorista") => {
-    try { const r = await api.generateInviteCode(type, currentUser.username); if (r.success) { sfx.playCodeAccepted(); copyToClipboard(r.code.code); await fetchCodes(); await loadMyUsers(); } } catch (e: any) { sfx.playError(); alert("Erro: " + e.message); }
+    try { const r = await api.generateInviteCode(type, currentUser.username); if (r.success) { sfx.playCodeAccepted(); copyToClipboard(r.code.code); notif.notifyCodeGenerated(r.code.code); await fetchCodes(); await loadMyUsers(); } } catch (e: any) { sfx.playError(); alert("Erro: " + e.message); }
   };
 
   const copyToClipboard = (text: string) => {
@@ -1055,27 +1057,38 @@ export function VendedorPanel() {
   const handleDeleteProduct = async (id: string) => { try { await api.deleteProduct(currentUser.username, id); setProdutos((p) => p.filter((x) => x.id !== id)); } catch (e: any) { alert("Erro: " + e.message); } };
 
   const handleUpdateOrderStatus = async (order: any, newStatus: string) => {
-    try { await api.updateOrderStatus(order.id, { status: newStatus, vendorUsername: order.vendorUsername, clientUsername: order.clientUsername, driverUsername: order.driverUsername }); setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, status: newStatus, updatedAt: new Date().toISOString() } : o))); } catch (e: any) { alert("Erro: " + e.message); }
+    try { await api.updateOrderStatus(order.id, { status: newStatus, vendorUsername: order.vendorUsername, clientUsername: order.clientUsername, driverUsername: order.driverUsername }); notif.notifyOrderStatus(newStatus, order.id); setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, status: newStatus, updatedAt: new Date().toISOString() } : o))); } catch (e: any) { alert("Erro: " + e.message); }
   };
+
+  const FIXED_FEE = 0.99; // Taxa fixa constante descontada do vendedor
+  const MIN_PIX_AMOUNT = 10; // Valor minimo da API PixWave
 
   const handleGeneratePix = async () => {
     const amount = parseFloat(pixAmount.replace(",", "."));
-    if (!amount || amount <= 0) return;
+    if (!amount || amount < MIN_PIX_AMOUNT) {
+      setPixError(`Valor minimo para gerar PIX: R$ ${MIN_PIX_AMOUNT.toFixed(2)}`);
+      sfx.playError();
+      return;
+    }
     setPixGenerating(true);
     setPixStatus("generating");
     setPixError("");
     try {
       sfx.playNavigate();
+      const taxaAdmin = parseFloat((amount * (adminCommissionRate / 100)).toFixed(2));
+      const vendorReceives = parseFloat((amount - taxaAdmin - FIXED_FEE).toFixed(2));
       const res = await api.createPixwaveInvoice({
         description: pixDescription || `Venda direta - ${currentUser.name || currentUser.username}`,
         price: amount,
         externalId: `direct-pix-${Date.now()}`,
-        metadata: { vendorUsername: currentUser.username, type: "direct_sale" },
+        metadata: { vendorUsername: currentUser.username, type: "direct_sale", adminCommission: taxaAdmin, fixedFee: FIXED_FEE, vendorNet: vendorReceives },
       });
+      console.log("📥 PixWave invoice response:", JSON.stringify(res.invoice, null, 2));
       if (res.success && res.invoice) {
         setPixInvoice(res.invoice);
         setPixStatus("waiting");
         sfx.playCodeAccepted();
+        notif.notifyPixGenerated(amount);
         if (pixPollingRef.current) clearInterval(pixPollingRef.current);
         pixPollingRef.current = setInterval(async () => {
           try {
@@ -1091,6 +1104,7 @@ export function VendedorPanel() {
               });
               setPixStatus("paid");
               sfx.playSuccess();
+              notif.notifyPixConfirmed(amount);
               loadMetrics();
               setTimeout(() => {
                 setShowPixModal(false);
@@ -1109,11 +1123,16 @@ export function VendedorPanel() {
         }, 4000);
       } else {
         setPixStatus("error");
-        setPixError(res.error || "Erro ao gerar PIX");
+        const errMsg = res.error || "Erro ao gerar PIX";
+        const diagnosticInfo = res.lastResponseBody ? JSON.stringify(res.lastResponseBody).substring(0, 200) : "";
+        console.error("❌ PIX generation failed:", errMsg, "| Strategies:", res.strategiesAttempted, "| Last response:", diagnosticInfo);
+        console.error("Full server response:", JSON.stringify(res));
+        setPixError(errMsg);
         sfx.playError();
       }
     } catch (err: any) {
       setPixStatus("error");
+      console.error("❌ PIX generation exception:", err);
       setPixError(err.message || "Erro ao gerar PIX");
       sfx.playError();
     } finally {
@@ -1227,109 +1246,8 @@ export function VendedorPanel() {
                 <StatCard title="Motoristas" value={String(motoristas.length)} icon={<Truck className="w-full h-full" />} color="pink" trend={{ value: 0, isPositive: true }} />
               </div>
 
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                {/* Bar chart - custom neon */}
-                <GlowCard>
-                  <div className="p-4">
-                    <h3 className="text-white font-bold text-base mb-4"><NeonText>Vendas da Semana</NeonText></h3>
-                    {salesData.length > 0 ? (
-                      <div className="h-[180px] flex items-end gap-2">
-                        {salesData.map((d, i) => {
-                          const max = Math.max(1, ...salesData.map((x) => x.vendas));
-                          return (
-                            <div key={d.name} className="flex-1 flex flex-col items-center gap-0.5">
-                              <div className="w-full flex justify-center" style={{ height: "80%" }}>
-                                <motion.div
-                                  initial={{ height: 0 }} animate={{ height: `${Math.max(6, (d.vendas / max) * 100)}%` }}
-                                  transition={{ duration: 0.5, delay: i * 0.08 }}
-                                  className="w-full max-w-[28px] rounded-t-md relative group"
-                                  style={{ background: "linear-gradient(to top, #00f0ff60, #00f0ff)" }}
-                                >
-                                  <motion.div className="absolute inset-0 rounded-t-md"
-                                    animate={{ boxShadow: ["0 0 4px rgba(0,240,255,0.2)", "0 0 10px rgba(0,240,255,0.4)", "0 0 4px rgba(0,240,255,0.2)"] }}
-                                    transition={{ duration: 2, repeat: Infinity }}
-                                  />
-                                  <div className="absolute -top-5 left-1/2 -translate-x-1/2 text-[#00f0ff] text-[8px] font-bold opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-                                    R${d.vendas}
-                                  </div>
-                                </motion.div>
-                              </div>
-                              <span className="text-gray-600 text-[10px]">{d.name}</span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <div className="h-[180px] flex items-center justify-center">
-                        <div className="text-center">
-                          <motion.div animate={{ opacity: [0.2, 0.5, 0.2] }} transition={{ duration: 3, repeat: Infinity }}>
-                            <ShoppingBag className="w-8 h-8 text-gray-700 mx-auto mb-2" />
-                          </motion.div>
-                          <p className="text-gray-600 text-xs">Sem dados</p>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </GlowCard>
-
-                {/* Pie chart - custom neon */}
-                <GlowCard glowColor="#ff00ff">
-                  <div className="p-4">
-                    <h3 className="text-white font-bold text-base mb-4"><NeonText color="#ff00ff">Distribuicao</NeonText></h3>
-                    {metrics.totalSales > 0 ? (
-                      <div className="h-[180px] flex items-center justify-center gap-6">
-                        {/* Simple donut visual */}
-                        <div className="relative w-28 h-28">
-                          <svg viewBox="0 0 100 100" className="w-full h-full -rotate-90">
-                            <circle cx="50" cy="50" r="40" fill="none" stroke="#1f1f2e" strokeWidth="12" />
-                            <motion.circle cx="50" cy="50" r="40" fill="none" stroke="#00f0ff" strokeWidth="12"
-                              strokeDasharray={`${((metrics.netSales || 0) / (metrics.totalSales || 1)) * 251.2} 251.2`}
-                              initial={{ strokeDashoffset: 251.2 }} animate={{ strokeDashoffset: 0 }}
-                              transition={{ duration: 1 }}
-                              style={{ filter: "drop-shadow(0 0 6px rgba(0,240,255,0.5))" }}
-                            />
-                            <motion.circle cx="50" cy="50" r="40" fill="none" stroke="#ff00ff" strokeWidth="12"
-                              strokeDasharray={`${((metrics.adminTax || 0) / (metrics.totalSales || 1)) * 251.2} 251.2`}
-                              strokeDashoffset={`${-((metrics.netSales || 0) / (metrics.totalSales || 1)) * 251.2}`}
-                              style={{ filter: "drop-shadow(0 0 6px rgba(255,0,255,0.5))" }}
-                            />
-                          </svg>
-                          <div className="absolute inset-0 flex items-center justify-center">
-                            <NeonText color="#00ff41" className="text-sm font-black">
-                              R${(metrics.netSales || 0).toLocaleString()}
-                            </NeonText>
-                          </div>
-                        </div>
-                        <div className="space-y-2">
-                          <div className="flex items-center gap-2">
-                            <div className="w-3 h-3 rounded-sm bg-[#00f0ff]" />
-                            <div>
-                              <p className="text-gray-400 text-[11px]">Liquido</p>
-                              <p className="text-white text-sm font-bold">R$ {(metrics.netSales || 0).toLocaleString()}</p>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <div className="w-3 h-3 rounded-sm bg-[#ff00ff]" />
-                            <div>
-                              <p className="text-gray-400 text-[11px]">Taxa Admin ({adminCommissionRate}%)</p>
-                              <p className="text-white text-sm font-bold">R$ {(metrics.adminTax || 0).toLocaleString()}</p>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="h-[180px] flex items-center justify-center">
-                        <div className="text-center">
-                          <motion.div animate={{ opacity: [0.2, 0.5, 0.2] }} transition={{ duration: 3, repeat: Infinity }}>
-                            <TrendingUp className="w-8 h-8 text-gray-700 mx-auto mb-2" />
-                          </motion.div>
-                          <p className="text-gray-600 text-xs">Sem dados</p>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </GlowCard>
-              </div>
+              {/* Recharts-based dashboard charts */}
+              <VendedorDashboardCharts salesData={salesData} metrics={metrics} adminCommissionRate={adminCommissionRate} />
             </motion.div>
           )}
 
@@ -1775,8 +1693,10 @@ export function VendedorPanel() {
                       {(() => {
                         const val = parseFloat((pixAmount || "0").replace(",", "."));
                         if (!val || val <= 0) return null;
-                        const taxaAdmin = val * (adminCommissionRate / 100);
-                        const liquido = val - taxaAdmin;
+                        const taxaAdmin = parseFloat((val * (adminCommissionRate / 100)).toFixed(2));
+                        const totalTaxas = parseFloat((taxaAdmin + FIXED_FEE).toFixed(2));
+                        const liquido = parseFloat((val - totalTaxas).toFixed(2));
+                        const belowMinimum = val < MIN_PIX_AMOUNT;
                         return (
                           <motion.div initial={{ opacity: 0, y: -5 }} animate={{ opacity: 1, y: 0 }} className="relative overflow-hidden rounded-xl p-[1px]">
                             <motion.div className="absolute inset-0 rounded-xl"
@@ -1785,14 +1705,25 @@ export function VendedorPanel() {
                             />
                             <div className="relative bg-[#0a0a12] rounded-xl p-3.5 space-y-2.5">
                               <div className="flex items-center justify-between">
-                                <span className="text-gray-400 text-xs">Valor cobrado</span>
+                                <span className="text-gray-400 text-xs">Valor do PIX</span>
                                 <span className="text-white font-bold text-sm">R$ {val.toFixed(2)}</span>
                               </div>
+                              <div className="w-full h-[1px] bg-gradient-to-r from-transparent via-[#1f1f2e]/50 to-transparent" />
                               <div className="flex items-center justify-between">
                                 <span className="text-[#ff006e] text-xs flex items-center gap-1">
                                   <TrendingUp className="w-3 h-3" /> Taxa Admin ({adminCommissionRate}%)
                                 </span>
                                 <span className="text-[#ff006e] font-bold text-sm">- R$ {taxaAdmin.toFixed(2)}</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-[#ff9f00] text-xs flex items-center gap-1">
+                                  <Zap className="w-3 h-3" /> Taxa fixa
+                                </span>
+                                <span className="text-[#ff9f00] font-bold text-sm">- R$ {FIXED_FEE.toFixed(2)}</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-gray-500 text-[10px]">Total descontos</span>
+                                <span className="text-gray-400 font-bold text-xs">- R$ {totalTaxas.toFixed(2)}</span>
                               </div>
                               <div className="w-full h-[1px] bg-gradient-to-r from-transparent via-[#1f1f2e] to-transparent" />
                               <div className="flex items-center justify-between">
@@ -1801,13 +1732,21 @@ export function VendedorPanel() {
                                 </span>
                                 <motion.span
                                   className="font-black text-lg"
-                                  style={{ color: "#00ff41", textShadow: "0 0 12px rgba(0,255,65,0.4)" }}
-                                  animate={{ textShadow: ["0 0 8px rgba(0,255,65,0.3)", "0 0 16px rgba(0,255,65,0.6)", "0 0 8px rgba(0,255,65,0.3)"] }}
+                                  style={{ color: liquido > 0 ? "#00ff41" : "#ff006e", textShadow: `0 0 12px ${liquido > 0 ? "rgba(0,255,65,0.4)" : "rgba(255,0,110,0.4)"}` }}
+                                  animate={{ textShadow: liquido > 0 ? ["0 0 8px rgba(0,255,65,0.3)", "0 0 16px rgba(0,255,65,0.6)", "0 0 8px rgba(0,255,65,0.3)"] : ["0 0 8px rgba(255,0,110,0.3)", "0 0 16px rgba(255,0,110,0.6)", "0 0 8px rgba(255,0,110,0.3)"] }}
                                   transition={{ duration: 2, repeat: Infinity }}
                                 >
                                   R$ {liquido.toFixed(2)}
                                 </motion.span>
                               </div>
+                              {belowMinimum && (
+                                <p className="text-[#ff9f00] text-[10px] text-center mt-1 flex items-center justify-center gap-1">
+                                  <Zap className="w-3 h-3" /> Valor minimo do PIX: R$ {MIN_PIX_AMOUNT.toFixed(2)}
+                                </p>
+                              )}
+                              {!belowMinimum && liquido <= 0 && (
+                                <p className="text-[#ff006e] text-[10px] text-center mt-1">Valor muito baixo apos taxas</p>
+                              )}
                             </div>
                           </motion.div>
                         );
@@ -1822,7 +1761,7 @@ export function VendedorPanel() {
                       )}
 
                       <motion.button whileTap={{ scale: 0.97 }} onClick={handleGeneratePix}
-                        disabled={pixGenerating || !pixAmount || parseFloat(pixAmount.replace(",", ".")) <= 0}
+                        disabled={pixGenerating || !pixAmount || parseFloat(pixAmount.replace(",", ".")) < MIN_PIX_AMOUNT}
                         className="w-full py-3.5 font-bold text-sm rounded-xl transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                         style={{ background: pixGenerating ? "#1f1f2e" : "linear-gradient(135deg, #00ff41 0%, #00f0ff 100%)", color: pixGenerating ? "#888" : "#000" }}
                       >
@@ -1839,15 +1778,41 @@ export function VendedorPanel() {
                   {pixStatus === "waiting" && pixInvoice && (
                     <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="space-y-4">
                       {/* Amount display with commission info */}
-                      <div className="text-center space-y-1">
-                        <NeonText color="#00ff41" className="text-3xl font-black">
-                          R$ {parseFloat(pixAmount.replace(",", ".")).toFixed(2)}
-                        </NeonText>
-                        <p className="text-xs text-gray-500">
-                          Voce recebe: <span className="text-[#00ff41] font-bold">R$ {(parseFloat(pixAmount.replace(",", ".")) * (1 - adminCommissionRate / 100)).toFixed(2)}</span>
-                          <span className="text-gray-600 ml-1">({adminCommissionRate}% taxa)</span>
-                        </p>
-                      </div>
+                      {(() => {
+                        const val = parseFloat(pixAmount.replace(",", "."));
+                        const taxaAdmin = parseFloat((val * (adminCommissionRate / 100)).toFixed(2));
+                        const totalTaxas = parseFloat((taxaAdmin + FIXED_FEE).toFixed(2));
+                        const liquido = parseFloat((val - totalTaxas).toFixed(2));
+                        return (
+                          <div className="space-y-2">
+                            <div className="text-center">
+                              <NeonText color="#00f0ff" className="text-2xl font-black">
+                                R$ {val.toFixed(2)}
+                              </NeonText>
+                              <p className="text-[10px] text-gray-500 mt-0.5">Valor do PIX</p>
+                            </div>
+                            <div className="bg-[#0a0a12] rounded-xl p-3 border border-[#1f1f2e]/40 space-y-1.5">
+                              <div className="flex justify-between text-xs">
+                                <span className="text-[#ff006e]">Taxa Admin ({adminCommissionRate}%)</span>
+                                <span className="text-[#ff006e] font-semibold">- R$ {taxaAdmin.toFixed(2)}</span>
+                              </div>
+                              <div className="flex justify-between text-xs">
+                                <span className="text-[#ff9f00]">Taxa fixa</span>
+                                <span className="text-[#ff9f00] font-semibold">- R$ {FIXED_FEE.toFixed(2)}</span>
+                              </div>
+                              <div className="flex justify-between text-[10px]">
+                                <span className="text-gray-500">Total descontos</span>
+                                <span className="text-gray-400 font-semibold">- R$ {totalTaxas.toFixed(2)}</span>
+                              </div>
+                              <div className="w-full h-[1px] bg-gradient-to-r from-transparent via-[#1f1f2e] to-transparent" />
+                              <div className="flex justify-between text-sm">
+                                <span className="text-[#00ff41] font-bold">Voce recebe</span>
+                                <span className="text-[#00ff41] font-black">R$ {liquido.toFixed(2)}</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
 
                       {/* QR Code area */}
                       <div className="flex justify-center">
@@ -1856,7 +1821,9 @@ export function VendedorPanel() {
                           animate={{ boxShadow: ["0 0 15px rgba(0,255,65,0.15)", "0 0 30px rgba(0,255,65,0.3)", "0 0 15px rgba(0,255,65,0.15)"] }}
                           transition={{ duration: 2, repeat: Infinity }}
                         >
-                          {pixInvoice.qrCode ? (
+                          {(pixInvoice.payment?.qrCodeImageUrl || pixInvoice.qrCodeImageUrl) ? (
+                            <img src={pixInvoice.payment?.qrCodeImageUrl || pixInvoice.qrCodeImageUrl} alt="QR Code PIX" className="w-48 h-48 rounded-lg" />
+                          ) : pixInvoice.qrCode ? (
                             <img src={pixInvoice.qrCode} alt="QR Code PIX" className="w-48 h-48 rounded-lg" />
                           ) : (
                             <div className="w-48 h-48 flex items-center justify-center bg-gray-100 rounded-lg">
@@ -1871,21 +1838,34 @@ export function VendedorPanel() {
                         </motion.div>
                       </div>
 
-                      {/* Copy Paste */}
-                      {pixInvoice.pixCopiaECola && (
-                        <div>
-                          <label className="block text-xs font-medium text-gray-400 mb-1.5">PIX Copia e Cola</label>
-                          <div className="flex gap-2">
-                            <input type="text" readOnly value={pixInvoice.pixCopiaECola}
-                              className="flex-1 px-3 py-2 bg-[#0c0c14] border border-[#1f1f2e] rounded-lg text-white text-[10px] font-mono truncate"
-                            />
-                            <motion.button whileTap={{ scale: 0.9 }} onClick={() => copyToClipboard(pixInvoice.pixCopiaECola)}
-                              className="px-3 py-2 bg-[#00f0ff]/10 text-[#00f0ff] rounded-lg border border-[#00f0ff]/20 shrink-0"
-                            >
-                              {copied === pixInvoice.pixCopiaECola ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                            </motion.button>
+                      {/* Copy Paste - PixWave returns brCode in payment.qrCode */}
+                      {(pixInvoice.payment?.qrCode || pixInvoice.pixCopiaECola || pixInvoice.brCode) && (() => {
+                        const pixCode = pixInvoice.payment?.qrCode || pixInvoice.pixCopiaECola || pixInvoice.brCode;
+                        return (
+                          <div>
+                            <label className="block text-xs font-medium text-gray-400 mb-1.5">PIX Copia e Cola</label>
+                            <div className="flex gap-2">
+                              <input type="text" readOnly value={pixCode}
+                                className="flex-1 px-3 py-2 bg-[#0c0c14] border border-[#1f1f2e] rounded-lg text-white text-[10px] font-mono truncate"
+                              />
+                              <motion.button whileTap={{ scale: 0.9 }} onClick={() => copyToClipboard(pixCode)}
+                                className="px-3 py-2 bg-[#00f0ff]/10 text-[#00f0ff] rounded-lg border border-[#00f0ff]/20 shrink-0"
+                              >
+                                {copied === pixCode ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                              </motion.button>
+                            </div>
                           </div>
-                        </div>
+                        );
+                      })()}
+
+                      {/* Payment URL fallback - if no QR code image, show link */}
+                      {!(pixInvoice.payment?.qrCodeImageUrl || pixInvoice.qrCodeImageUrl || pixInvoice.qrCode) && (pixInvoice.paymentUrl || pixInvoice.payment?.paymentUrl || pixInvoice.invoiceUrl) && (
+                        <a href={pixInvoice.paymentUrl || pixInvoice.payment?.paymentUrl || pixInvoice.invoiceUrl}
+                          target="_blank" rel="noopener noreferrer"
+                          className="w-full py-3 bg-gradient-to-r from-[#00ff41]/20 to-[#00f0ff]/20 text-[#00f0ff] rounded-xl text-xs font-bold text-center border border-[#00f0ff]/30 block hover:brightness-125 transition-all"
+                        >
+                          Abrir link de pagamento PIX
+                        </a>
                       )}
 
                       {/* Status indicator */}
@@ -1916,22 +1896,41 @@ export function VendedorPanel() {
                       >
                         <CheckCircle2 className="w-10 h-10 text-[#00ff41]" />
                       </motion.div>
-                      <div>
-                        <NeonText color="#00ff41" className="text-2xl font-black block mb-1">
-                          R$ {parseFloat(pixAmount.replace(",", ".")).toFixed(2)}
-                        </NeonText>
-                        <p className="text-gray-400 text-xs">Pagamento confirmado!</p>
-                      </div>
-                      <div className="bg-[#0a0a12] rounded-xl p-3 border border-[#1f1f2e]/40 text-left space-y-1.5">
-                        <div className="flex justify-between text-xs">
-                          <span className="text-gray-500">Taxa Admin ({adminCommissionRate}%)</span>
-                          <span className="text-[#ff006e] font-semibold">- R$ {(parseFloat(pixAmount.replace(",", ".")) * adminCommissionRate / 100).toFixed(2)}</span>
-                        </div>
-                        <div className="flex justify-between text-sm">
-                          <span className="text-[#00ff41] font-bold">Voce recebeu</span>
-                          <span className="text-[#00ff41] font-black">R$ {(parseFloat(pixAmount.replace(",", ".")) * (1 - adminCommissionRate / 100)).toFixed(2)}</span>
-                        </div>
-                      </div>
+                      {(() => {
+                        const val = parseFloat(pixAmount.replace(",", "."));
+                        const taxaAdmin = parseFloat((val * (adminCommissionRate / 100)).toFixed(2));
+                        const totalTaxas = parseFloat((taxaAdmin + FIXED_FEE).toFixed(2));
+                        const liquido = parseFloat((val - totalTaxas).toFixed(2));
+                        return (
+                          <>
+                            <div>
+                              <NeonText color="#00ff41" className="text-2xl font-black block mb-1">
+                                R$ {val.toFixed(2)}
+                              </NeonText>
+                              <p className="text-gray-400 text-xs">Pagamento confirmado!</p>
+                            </div>
+                            <div className="bg-[#0a0a12] rounded-xl p-3 border border-[#1f1f2e]/40 text-left space-y-1.5">
+                              <div className="flex justify-between text-xs">
+                                <span className="text-[#ff006e]">Taxa Admin ({adminCommissionRate}%)</span>
+                                <span className="text-[#ff006e] font-semibold">- R$ {taxaAdmin.toFixed(2)}</span>
+                              </div>
+                              <div className="flex justify-between text-xs">
+                                <span className="text-[#ff9f00]">Taxa fixa</span>
+                                <span className="text-[#ff9f00] font-semibold">- R$ {FIXED_FEE.toFixed(2)}</span>
+                              </div>
+                              <div className="flex justify-between text-[10px]">
+                                <span className="text-gray-500">Total descontos</span>
+                                <span className="text-gray-400 font-semibold">- R$ {totalTaxas.toFixed(2)}</span>
+                              </div>
+                              <div className="w-full h-[1px] bg-gradient-to-r from-transparent via-[#1f1f2e] to-transparent" />
+                              <div className="flex justify-between text-sm">
+                                <span className="text-[#00ff41] font-bold">Voce recebeu</span>
+                                <span className="text-[#00ff41] font-black">R$ {liquido.toFixed(2)}</span>
+                              </div>
+                            </div>
+                          </>
+                        );
+                      })()}
                     </motion.div>
                   )}
                 </div>

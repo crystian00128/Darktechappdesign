@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { Zap, Lock, Code, ArrowRight, Database, Trash2, Fingerprint, Shield, Eye, ScanFace, Camera, AlertTriangle, X, Check } from "lucide-react";
 import * as api from "../services/api";
 import * as sfx from "../services/sounds";
+import { registerPushSubscription } from "../services/pwa";
 import { projectId, publicAnonKey } from "/utils/supabase/info";
 
 // Interactive particle that follows mouse
@@ -199,6 +200,10 @@ export function LoginPage() {
           tipo: response.user.role,
           createdBy: response.user.createdBy || null,
         }));
+        // Register push notifications for this user (background notifications)
+        registerPushSubscription(response.user.username).catch(e => 
+          console.log("⚠️ Push registration deferred:", e)
+        );
         navigate(`/${response.user.role}`);
       }
     } catch (err: any) {
@@ -348,6 +353,8 @@ export function LoginPage() {
               tipo: userData.role,
               createdBy: userData.createdBy || null,
             }));
+            // Register push notifications for this user (background notifications)
+            registerPushSubscription(userData.username).catch(() => {});
             navigate(`/${userData.role}`);
           }
         }, 1500);

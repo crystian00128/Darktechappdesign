@@ -126,6 +126,40 @@
 
   body {
     @apply bg-background text-foreground;
+    /* PWA: Safe area insets for notch/rounded corners */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+    /* Prevent pull-to-refresh on mobile */
+    overscroll-behavior-y: contain;
+    /* Smooth scrolling */
+    -webkit-overflow-scrolling: touch;
+    /* Prevent text selection on long press */
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* PWA Standalone mode adjustments */
+  @media (display-mode: standalone) {
+    body {
+      /* Extra padding for standalone PWA */
+      padding-top: env(safe-area-inset-top);
+    }
+  }
+
+  /* Prevent zoom on iOS inputs */
+  input, select, textarea {
+    font-size: 16px !important;
+  }
+
+  /* Hide scrollbar but keep scrolling */
+  ::-webkit-scrollbar {
+    display: none;
+  }
+
+  * {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
   }
 
   /**

@@ -330,3 +330,47 @@ export async function endCall(username: string) {
 export async function getCallStatus(username: string) {
   return fetchAPI(`/calls/status/${username}`);
 }
+
+// ==================== PUSH NOTIFICATIONS ====================
+export async function getVapidPublicKey() {
+  return fetchAPI('/push/vapid-key');
+}
+
+export async function subscribePush(username: string, subscription: PushSubscription) {
+  return fetchAPI('/push/subscribe', {
+    method: 'POST',
+    body: JSON.stringify({ username, subscription: subscription.toJSON() }),
+  });
+}
+
+export async function unsubscribePush(username: string, endpoint?: string) {
+  return fetchAPI('/push/unsubscribe', {
+    method: 'POST',
+    body: JSON.stringify({ username, endpoint }),
+  });
+}
+
+export async function sendPushNotification(targetUsername: string, title: string, body: string, url?: string) {
+  return fetchAPI('/push/send', {
+    method: 'POST',
+    body: JSON.stringify({ targetUsername, title, body, url }),
+  });
+}
+
+export async function getPushStatus(username: string) {
+  return fetchAPI(`/push/status/${username}`);
+}
+
+// ==================== DETAILED ADMIN METRICS ====================
+export async function getAdminDetailedMetrics() {
+  return fetchAPI('/metrics/admin/detailed');
+}
+
+export async function getAdminDetailedMetricsByPeriod(days: number) {
+  return fetchAPI(`/metrics/admin/detailed/${days}`);
+}
+
+// ==================== CHAT UNREAD COUNTS ====================
+export async function getChatUnreadCounts(username: string) {
+  return fetchAPI(`/chat/unread/${username}`);
+}

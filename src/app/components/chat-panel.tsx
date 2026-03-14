@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import * as api from "../services/api";
 import * as sfx from "../services/sounds";
+import { showLocalNotification } from "../services/pwa";
 
 interface Contact {
   username: string;
@@ -86,6 +87,7 @@ export function ChatPanel({
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -97,6 +99,32 @@ export function ChatPanel({
   const mediaLoadingRef = useRef<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
+  const prevMessageCountRef = useRef<number>(0);
+
+  // ─── Fetch unread counts ─────────────────────
+  const loadUnreadCounts = useCallback(async () => {
+    try {
+      const res = await api.getChatUnreadCounts(currentUsername);
+      if (res.success) setUnreadCounts(res.unreadCounts || {});
+    } catch {}
+  }, [currentUsername]);
+
+  useEffect(() => {
+    loadUnreadCounts();
+    const interval = setInterval(loadUnreadCounts, 5000);
+    return () => clearInterval(interval);
+  }, [loadUnreadCounts]);
+
+  // Clear unread for selected chat
+  useEffect(() => {
+    if (selectedChat && unreadCounts[selectedChat]) {
+      setUnreadCounts(prev => {
+        const next = { ...prev };
+        delete next[selectedChat];
+        return next;
+      });
+    }
+  }, [selectedChat]);
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(null), 3000); };
 
@@ -202,6 +230,26 @@ export function ChatPanel({
             } else { mediaToFetch.push(msg); }
           }
         }
+
+        // Detect new incoming messages for push notification
+        const incomingNew = serverMsgs.filter(m => m.from !== currentUsername && !m.read);
+        if (incomingNew.length > 0 && serverMsgs.length > prevMessageCountRef.current && prevMessageCountRef.current > 0) {
+          const lastMsg = incomingNew[incomingNew.length - 1];
+          const senderContact = contacts.find(c => c.username === lastMsg.from);
+          const senderName = senderContact?.name || lastMsg.from;
+          // Send push notification if app is in background
+          if (document.hidden) {
+            showLocalNotification(
+              `${senderName}`,
+              lastMsg.type === "audio" ? "Mensagem de audio" : lastMsg.type === "image" ? "Foto" : lastMsg.text,
+              `/${currentUsername}`,
+              `chat-${lastMsg.from}`
+            );
+          }
+          sfx.playMessageReceived();
+        }
+        prevMessageCountRef.current = serverMsgs.length;
+
         setMessages([...serverMsgs]);
         api.markMessagesRead(currentUsername, selectedChat, currentUsername).catch(() => {});
         if (mediaToFetch.length > 0) {
@@ -217,7 +265,7 @@ export function ChatPanel({
         }
       }
     } catch (err) { console.error("Erro ao carregar mensagens:", err); }
-  }, [currentUsername, selectedChat, hydrateMediaForMsg]);
+  }, [currentUsername, selectedChat, hydrateMediaForMsg, contacts]);
 
   useEffect(() => {
     if (selectedChat) {
@@ -425,7 +473,8 @@ export function ChatPanel({
                     group.contacts.map((contact) => (
                       <ContactButton key={contact.username} contact={contact}
                         selected={selectedChat === contact.username} gradient={group.gradient}
-                        accentColor={accentColor} onClick={() => setSelectedChat(contact.username)} />
+                        accentColor={accentColor} onClick={() => setSelectedChat(contact.username)}
+                        unreadCount={unreadCounts[contact.username] || 0} />
                     ))
                   ) : (
                     <p className="text-gray-500 text-sm text-center py-3">Nenhum contato</p>
@@ -441,7 +490,8 @@ export function ChatPanel({
                   <ContactButton key={contact.username} contact={contact}
                     selected={selectedChat === contact.username}
                     gradient="linear-gradient(135deg, #00f0ff 0%, #8b5cf6 100%)"
-                    accentColor={accentColor} onClick={() => setSelectedChat(contact.username)} />
+                    accentColor={accentColor} onClick={() => setSelectedChat(contact.username)}
+                    unreadCount={unreadCounts[contact.username] || 0} />
                 ))
               ) : (
                 <p className="text-gray-500 text-sm text-center py-8">Nenhum contato disponivel</p>
@@ -637,24 +687,44 @@ export function ChatPanel({
 }
 
 function ContactButton({
-  contact, selected, gradient, accentColor, onClick,
+  contact, selected, gradient, accentColor, onClick, unreadCount = 0,
 }: {
-  contact: Contact; selected: boolean; gradient: string; accentColor: string; onClick: () => void;
+  contact: Contact; selected: boolean; gradient: string; accentColor: string; onClick: () => void; unreadCount?: number;
 }) {
   return (
     <button onClick={onClick}
       className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all ${selected ? "" : "hover:bg-[#1f1f2e]"}`}
       style={selected ? { backgroundColor: `${accentColor}15`, borderColor: accentColor, borderWidth: 1, borderStyle: "solid" } : {}}>
-      <div className="w-12 h-12 rounded-full flex items-center justify-center font-bold text-white border-2 border-gray-600 flex-shrink-0"
-        style={{ background: gradient }}>
-        {getAvatarText(contact.photo)}
+      <div className="relative flex-shrink-0">
+        <div className="w-12 h-12 rounded-full flex items-center justify-center font-bold text-white border-2 border-gray-600"
+          style={{ background: gradient }}>
+          {getAvatarText(contact.photo)}
+        </div>
+        {unreadCount > 0 && (
+          <motion.div
+            initial={{ scale: 0 }}
+            animate={{ scale: 1 }}
+            className="absolute -top-1 -right-1 min-w-[20px] h-[20px] bg-[#ff006e] rounded-full flex items-center justify-center px-1 shadow-[0_0_8px_rgba(255,0,110,0.5)]"
+          >
+            <span className="text-white text-[10px] font-black">{unreadCount > 99 ? "99+" : unreadCount}</span>
+          </motion.div>
+        )}
       </div>
       <div className="flex-1 text-left min-w-0">
-        <p className="text-white font-semibold truncate">{contact.name}</p>
+        <p className={`font-semibold truncate ${unreadCount > 0 ? "text-white" : "text-white"}`}>{contact.name}</p>
         <p className="text-gray-400 text-sm truncate">@{contact.username}</p>
       </div>
-      <motion.div animate={{ opacity: [1, 0.3, 1] }} transition={{ duration: 2, repeat: Infinity }}
-        className="w-2 h-2 bg-[#00ff41] rounded-full flex-shrink-0" />
+      <div className="flex flex-col items-center gap-1 shrink-0">
+        <motion.div animate={{ opacity: [1, 0.3, 1] }} transition={{ duration: 2, repeat: Infinity }}
+          className="w-2 h-2 bg-[#00ff41] rounded-full" />
+        {unreadCount > 0 && (
+          <motion.div
+            animate={{ scale: [1, 1.2, 1] }}
+            transition={{ duration: 1.5, repeat: Infinity }}
+            className="w-1.5 h-1.5 bg-[#ff006e] rounded-full"
+          />
+        )}
+      </div>
     </button>
   );
 }

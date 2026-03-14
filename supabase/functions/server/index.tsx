@@ -1,9 +1,119 @@
 import { Hono } from "npm:hono";
 import { cors } from "npm:hono/cors";
 import { logger } from "npm:hono/logger";
+import webpush from "npm:web-push";
 import * as kv from "./kv_store.tsx";
 
 const app = new Hono();
+
+// ══════════════════════════════════════════════════════════════
+// WEB PUSH — VAPID KEY MANAGEMENT
+// Generates VAPID keys once and stores them in KV
+// This is what enables push notifications even when app is closed
+// Same technology used by WhatsApp, Facebook, banks, etc.
+// ══════════════════════════════════════════════════════════════
+async function getOrCreateVapidKeys(): Promise<{ publicKey: string; privateKey: string }> {
+  const existing = await kv.get("config:vapid_keys");
+  if (existing && existing.publicKey && existing.privateKey) {
+    return existing;
+  }
+  console.log("🔑 Generating new VAPID keys for push notifications...");
+  const vapidKeys = webpush.generateVAPIDKeys();
+  const keys = {
+    publicKey: vapidKeys.publicKey,
+    privateKey: vapidKeys.privateKey,
+  };
+  await kv.set("config:vapid_keys", keys);
+  console.log("✅ VAPID keys generated and stored");
+  return keys;
+}
+
+// Initialize VAPID on startup
+let vapidInitialized = false;
+async function ensureVapidSetup() {
+  if (vapidInitialized) return;
+  try {
+    const keys = await getOrCreateVapidKeys();
+    webpush.setVapidDetails(
+      "mailto:neondelivery@app.com",
+      keys.publicKey,
+      keys.privateKey
+    );
+    vapidInitialized = true;
+    console.log("✅ VAPID configured for Web Push");
+  } catch (e) {
+    console.error("❌ Failed to setup VAPID:", e);
+  }
+}
+
+// Helper: Send push notification to a specific user
+async function sendPushToUser(targetUsername: string, payload: {
+  title: string;
+  body: string;
+  icon?: string;
+  badge?: string;
+  tag?: string;
+  data?: Record<string, unknown>;
+  vibrate?: number[];
+}) {
+  await ensureVapidSetup();
+  
+  // Get all subscriptions for this user (multiple devices)
+  const subscriptions = await kv.get(`push:subscriptions:${targetUsername}`) || [];
+  if (subscriptions.length === 0) {
+    console.log(`[PUSH] No subscriptions for user ${targetUsername}`);
+    return { sent: 0, failed: 0 };
+  }
+
+  console.log(`[PUSH] Sending to ${subscriptions.length} device(s) of ${targetUsername}`);
+  
+  const notifPayload = JSON.stringify({
+    title: payload.title,
+    body: payload.body,
+    icon: payload.icon || "/icons/icon.svg",
+    badge: payload.badge || "/icons/icon.svg",
+    tag: payload.tag || `neon-${Date.now()}`,
+    vibrate: payload.vibrate || [200, 100, 200, 100, 200],
+    data: payload.data || { url: "/" },
+    actions: [
+      { action: "open", title: "Abrir" },
+      { action: "close", title: "Fechar" },
+    ],
+    requireInteraction: true,
+    renotify: true,
+  });
+
+  let sent = 0;
+  let failed = 0;
+  const validSubscriptions: typeof subscriptions = [];
+
+  for (const sub of subscriptions) {
+    try {
+      await webpush.sendNotification(sub, notifPayload);
+      validSubscriptions.push(sub);
+      sent++;
+    } catch (err: any) {
+      console.log(`[PUSH] Failed to send to device:`, err.statusCode || err.message);
+      // 410 Gone or 404 means subscription expired — remove it
+      if (err.statusCode === 410 || err.statusCode === 404) {
+        console.log(`[PUSH] Removing expired subscription for ${targetUsername}`);
+        failed++;
+      } else {
+        // Keep subscription for transient errors
+        validSubscriptions.push(sub);
+        failed++;
+      }
+    }
+  }
+
+  // Update subscriptions if any were removed
+  if (validSubscriptions.length !== subscriptions.length) {
+    await kv.set(`push:subscriptions:${targetUsername}`, validSubscriptions);
+  }
+
+  console.log(`[PUSH] Results for ${targetUsername}: ${sent} sent, ${failed} failed`);
+  return { sent, failed };
+}
 
 // Enable logger
 app.use('*', logger(console.log));
@@ -1153,6 +1263,28 @@ app.post("/make-server-42377006/chat/send", async (c) => {
     const messages = await kv.get(`chat:${chatId}`) || [];
     messages.push(msg);
     await kv.set(`chat:${chatId}`, messages);
+
+    // ═══ PUSH NOTIFICATION — Send to recipient even if app is closed ═══
+    try {
+      const sender = await kv.get(`user:${from}`);
+      const senderName = sender?.name || from;
+      
+      let notifBody = text;
+      if (type === "audio") notifBody = "🎵 Mensagem de áudio";
+      else if (type === "image") notifBody = "📷 Foto";
+      
+      // Fire and forget — don't block the response
+      sendPushToUser(to, {
+        title: `💬 ${senderName}`,
+        body: notifBody,
+        tag: `chat-${from}-${Date.now()}`,
+        data: { url: "/", chatWith: from, type: "chat_message" },
+        vibrate: [200, 100, 200, 100, 200],
+      }).catch((e: any) => console.log("[PUSH] Non-critical push error:", e.message));
+    } catch (pushErr) {
+      console.log("[PUSH] Non-critical error sending push for chat:", pushErr);
+    }
+
     return c.json({ success: true, message: msg });
   } catch (error) {
     console.error("❌ Erro ao enviar mensagem:", error);
@@ -1356,6 +1488,20 @@ app.post("/make-server-42377006/orders", async (c) => {
     const clientOrders = await kv.get(`orders:client:${clientUsername}`) || [];
     clientOrders.push(order);
     await kv.set(`orders:client:${clientUsername}`, clientOrders);
+
+    // ═══ PUSH — Notify vendor about new order ═══
+    try {
+      const client = await kv.get(`user:${clientUsername}`);
+      const clientName = client?.name || clientUsername;
+      sendPushToUser(vendorUsername, {
+        title: "🛒 Novo Pedido!",
+        body: `${clientName} fez um pedido de R$ ${Number(total).toFixed(2)}`,
+        tag: `order-${order.id}`,
+        data: { url: "/", type: "new_order", orderId: order.id },
+        vibrate: [300, 100, 300, 100, 300],
+      }).catch((e: any) => console.log("[PUSH] Order notify error:", e.message));
+    } catch (e) { /* non-critical */ }
+
     return c.json({ success: true, order });
   } catch (error) {
     console.error("❌ Erro ao criar pedido:", error);
@@ -1430,6 +1576,39 @@ app.put("/make-server-42377006/orders/:orderId/status", async (c) => {
       }
       await kv.set(`orders:driver:${driverUsername}`, driverOrders);
     }
+
+    // ═══ PUSH — Notify about order status changes ═══
+    try {
+      const statusLabels: Record<string, string> = {
+        accepted: "✅ Pedido aceito!",
+        preparing: "👨‍🍳 Pedido em preparo",
+        delivering: "🚗 Pedido saiu para entrega!",
+        delivered: "📦 Pedido entregue!",
+        cancelled: "❌ Pedido cancelado",
+      };
+      const label = statusLabels[status] || `Pedido: ${status}`;
+      
+      // Notify client about status change
+      sendPushToUser(clientUsername, {
+        title: label,
+        body: `Seu pedido #${orderId.slice(-6)} foi atualizado`,
+        tag: `order-status-${orderId}`,
+        data: { url: "/", type: "order_status", orderId },
+        vibrate: [200, 100, 200],
+      }).catch(() => {});
+      
+      // If delivering, also notify driver
+      if (driverUsername && status === "delivering") {
+        sendPushToUser(driverUsername, {
+          title: "🚗 Nova entrega!",
+          body: `Você tem uma nova entrega para realizar`,
+          tag: `delivery-${orderId}`,
+          data: { url: "/", type: "new_delivery", orderId },
+          vibrate: [300, 100, 300],
+        }).catch(() => {});
+      }
+    } catch (e) { /* non-critical */ }
+
     return c.json({ success: true, message: `Pedido atualizado para ${status}` });
   } catch (error) {
     console.error("❌ Erro ao atualizar pedido:", error);
@@ -1812,47 +1991,91 @@ app.post("/make-server-42377006/pixwave/invoice", async (c) => {
     ];
 
     // PixWave API expects price in REAIS (float) - NOT centavos!
-    // Sending centavos (price * 100) was causing 100x overcharge bug
     // Round to 2 decimal places to avoid floating point issues
     const priceFinal = Math.round(priceNum * 100) / 100;
 
-    // Strategy: try multiple approaches with exponential backoff
-    // The 520 "Erro ao gerar QR Code" is a transient PixWave backend error
-    // Approaches: with webhooks first, then without webhooks (simpler request)
-    const strategies = [
-      { label: "standard", includeWebhooks: true },
-      { label: "standard-retry", includeWebhooks: true },
-      { label: "no-webhooks", includeWebhooks: false },
-      { label: "no-webhooks-retry", includeWebhooks: false },
-      { label: "minimal", includeWebhooks: false },
+    // Strategies: vary body format to diagnose which fields PixWave accepts
+    // 520 "Erro ao gerar QR Code" may be caused by unsupported fields or format
+    const strategies: { label: string; buildBody: () => Record<string, unknown>; delay: number }[] = [
+      {
+        label: "clean-minimal",
+        delay: 0,
+        buildBody: () => ({ description, price: priceFinal }),
+      },
+      {
+        label: "with-external-id",
+        delay: 3000,
+        buildBody: () => {
+          const b: Record<string, unknown> = { description, price: priceFinal };
+          if (externalId) b.externalId = externalId;
+          return b;
+        },
+      },
+      {
+        label: "with-webhooks",
+        delay: 4000,
+        buildBody: () => {
+          const b: Record<string, unknown> = { description, price: priceFinal, webhooks };
+          if (externalId) b.externalId = externalId;
+          return b;
+        },
+      },
+      {
+        label: "full-typed",
+        delay: 5000,
+        buildBody: () => {
+          const b: Record<string, unknown> = {
+            description,
+            price: priceFinal,
+            invoiceType: "SINGLE",
+            paymentTypes: ["PIX"],
+            webhooks,
+          };
+          if (externalId) b.externalId = externalId;
+          if (redirectTo) b.redirectTo = redirectTo;
+          return b;
+        },
+      },
+      {
+        label: "amount-field",
+        delay: 6000,
+        buildBody: () => ({ description, amount: priceFinal }),
+      },
+      {
+        label: "price-string",
+        delay: 7000,
+        buildBody: () => ({ description, price: priceFinal.toFixed(2) }),
+      },
+      {
+        label: "centavos-int",
+        delay: 8000,
+        buildBody: () => ({ description, price: Math.round(priceFinal * 100) }),
+      },
     ];
 
     let lastError = "";
+    let lastStatus = 500;
+    let lastResponseBody: any = null;
+
     for (let i = 0; i < strategies.length; i++) {
       const strategy = strategies[i];
-      if (i > 0) {
-        const delay = 2000 + (i - 1) * 1000;
-        console.log(`🔄 Strategy "${strategy.label}" (attempt ${i + 1}/${strategies.length}), waiting ${delay}ms...`);
-        await new Promise(r => setTimeout(r, delay));
+      if (strategy.delay > 0) {
+        console.log(`🔄 Strategy "${strategy.label}" (attempt ${i + 1}/${strategies.length}), waiting ${strategy.delay}ms...`);
+        await new Promise(r => setTimeout(r, strategy.delay));
       }
 
-      const body: Record<string, unknown> = {
-        description,
-        price: priceFinal,
-        invoiceType: "SINGLE",
-        paymentTypes: ["PIX"],
-      };
-      if (strategy.includeWebhooks) body.webhooks = webhooks;
-      if (externalId) body.externalId = externalId;
-      if (redirectTo && strategy.label !== "minimal") body.redirectTo = redirectTo;
-
-      console.log(`📤 PixWave create (${strategy.label}, R$ ${priceFinal}):`, JSON.stringify(body));
+      const body = strategy.buildBody();
+      console.log(`📤 PixWave create (${strategy.label}):`, JSON.stringify(body));
 
       let res: Response;
       try {
         res = await fetch(`${PIXWAVE_BASE}/create`, {
           method: "POST",
-          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+          },
           body: JSON.stringify(body),
         });
       } catch (fetchErr) {
@@ -1862,47 +2085,52 @@ app.post("/make-server-42377006/pixwave/invoice", async (c) => {
       }
 
       const responseText = await res.text();
-      console.log(`📥 PixWave response (${strategy.label}):`, res.status, responseText);
+      console.log(`📥 PixWave response (${strategy.label}): HTTP ${res.status} | Body: ${responseText.substring(0, 1000)}`);
 
       let data: any;
       try { data = JSON.parse(responseText); } catch {
-        console.error("❌ PixWave returned non-JSON:", responseText);
-        lastError = `Resposta inválida do PixWave (${res.status})`;
+        console.error("❌ PixWave returned non-JSON:", responseText.substring(0, 500));
+        lastError = `Resposta inválida do PixWave (${res.status}): ${responseText.substring(0, 200)}`;
+        lastStatus = res.status;
         continue;
       }
 
+      lastResponseBody = data;
+
       if (!res.ok) {
-        const errDetail = data.detail || data.message || data.error || "";
+        const errDetail = data.detail || data.message || data.error || JSON.stringify(data);
         console.error(`❌ PixWave error (${strategy.label}):`, res.status, errDetail);
-        lastError = errDetail || `Erro PixWave (${res.status})`;
-        if (res.status >= 500 || String(errDetail).includes("QR Code") || String(errDetail).includes("520") || String(errDetail).includes("not bound to a Session")) {
-          console.log(`🔄 Transient error ${res.status}, trying next strategy...`);
+        lastError = typeof errDetail === "string" ? errDetail : JSON.stringify(errDetail);
+        lastStatus = res.status;
+        if (res.status >= 500 || String(errDetail).includes("QR Code") || String(errDetail).includes("520") || String(errDetail).includes("not bound")) {
           continue;
         }
-        return c.json({ success: false, error: lastError, detail: data }, res.status);
+        return c.json({ success: false, error: lastError, detail: data, strategy: strategy.label }, res.status);
       }
 
       // Success!
+      console.log(`✅ PixWave invoice created (${strategy.label}):`, JSON.stringify(data).substring(0, 500));
       const invoice = { ...data, localMetadata: metadata || {}, createdLocally: new Date().toISOString() };
       await kv.set(`pixwave:invoice:${data.id}`, invoice);
       if (externalId) await kv.set(`pixwave:ext:${externalId}`, data.id);
-
-      if (!strategy.includeWebhooks) {
-        console.log(`ℹ️ Invoice created without webhooks, polling will handle status updates`);
-      }
 
       const invoiceList = (await kv.get("pixwave:invoices")) || [];
       invoiceList.unshift({ id: data.id, externalId: externalId || "", amount: data.amount || priceFinal, description: data.description, status: data.status, createdAt: data.createdAt, metadata: metadata || {} });
       if (invoiceList.length > 500) invoiceList.length = 500;
       await kv.set("pixwave:invoices", invoiceList);
 
-      console.log(`✅ PixWave invoice created (${strategy.label}):`, data.id, `R$ ${priceFinal}`);
-      return c.json({ success: true, invoice: data });
+      return c.json({ success: true, invoice: data, strategy: strategy.label });
     }
 
-    // All strategies failed
-    console.error("❌ All PixWave strategies failed. Last error:", lastError);
-    return c.json({ success: false, error: `Erro ao gerar PIX: ${lastError || "Todos os métodos falharam"}. O servidor PixWave pode estar instável - tente novamente em 30 segundos.` }, 502);
+    // All strategies failed - return full diagnostic info
+    console.error("❌ All PixWave strategies failed. Last error:", lastError, "Last response:", JSON.stringify(lastResponseBody));
+    return c.json({
+      success: false,
+      error: `Erro ao gerar PIX: ${lastError || "Todos os métodos falharam"}. Tente novamente em alguns segundos.`,
+      lastStatus,
+      lastResponseBody,
+      strategiesAttempted: strategies.map(s => s.label),
+    }, 502);
   } catch (error) {
     console.error("❌ Erro ao criar invoice PixWave:", error);
     return c.json({ success: false, error: String(error) }, 500);
@@ -1983,6 +2211,28 @@ app.post("/make-server-42377006/pixwave/webhook", async (c) => {
         }
       }
     }
+
+    // ═══ PUSH — Notify about PIX payment events ═══
+    try {
+      if (event === "PAYMENT_CONFIRMED" && localInvoice?.localMetadata?.vendorUsername) {
+        const vUser = localInvoice.localMetadata.vendorUsername;
+        const amount = localInvoice.amount || invoiceData.price || 0;
+        sendPushToUser(vUser, {
+          title: "💰 PIX Confirmado!",
+          body: `Pagamento de R$ ${Number(amount).toFixed(2)} recebido!`,
+          tag: `pix-paid-${invoiceData.id}`,
+          data: { url: "/", type: "pix_confirmed", invoiceId: invoiceData.id },
+          vibrate: [300, 100, 300, 100, 300],
+        }).catch(() => {});
+        // Also notify admin
+        sendPushToUser("admin", {
+          title: "💰 PIX Recebido",
+          body: `Vendedor ${vUser}: R$ ${Number(amount).toFixed(2)} confirmado`,
+          tag: `pix-admin-${invoiceData.id}`,
+          data: { url: "/", type: "pix_confirmed" },
+        }).catch(() => {});
+      }
+    } catch (e) { /* non-critical */ }
 
     const webhookLogs = (await kv.get("pixwave:webhook_logs")) || [];
     webhookLogs.unshift({ event, invoiceId: invoiceData.id, status: invoiceData.status, timestamp: new Date().toISOString(), payerName: paymentData?.payerName });
@@ -2073,6 +2323,19 @@ app.post("/make-server-42377006/calls/initiate", async (c) => {
     await kv.set(`call:incoming:${to}`, callData);
     await kv.set(`call:outgoing:${from}`, callData);
     console.log(`📞 Chamada iniciada: ${from} -> ${to} (${type})`);
+
+    // ═══ PUSH — Notify about incoming call ═══
+    try {
+      const callTypeLabel = type === "video" ? "📹 Videochamada" : "📞 Ligação";
+      sendPushToUser(to, {
+        title: `${callTypeLabel} recebida!`,
+        body: `${fromName || from} está ligando...`,
+        tag: `call-${callId}`,
+        data: { url: "/", type: "incoming_call", callId, from },
+        vibrate: [500, 200, 500, 200, 500, 200, 500],
+      }).catch(() => {});
+    } catch (e) { /* non-critical */ }
+
     return c.json({ success: true, callId, call: callData });
   } catch (error) {
     console.error("❌ Erro ao iniciar chamada:", error);
@@ -2155,6 +2418,567 @@ app.get("/make-server-42377006/calls/status/:username", async (c) => {
       inCall: !!(incoming?.status === "connected" || outgoing?.status === "connected")
     });
   } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+// WEB PUSH NOTIFICATION ENDPOINTS
+// These enable real push notifications that work even when
+// the app is completely closed — like WhatsApp, banks, etc.
+// ══════════════════════════════════════════════════════════════
+
+// Get VAPID public key (frontend needs this to subscribe)
+app.get("/make-server-42377006/push/vapid-key", async (c) => {
+  try {
+    await ensureVapidSetup();
+    const keys = await getOrCreateVapidKeys();
+    return c.json({ success: true, publicKey: keys.publicKey });
+  } catch (error) {
+    console.error("❌ Erro ao buscar VAPID key:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Subscribe a device to push notifications for a user
+app.post("/make-server-42377006/push/subscribe", async (c) => {
+  try {
+    const { username, subscription } = await c.req.json();
+    if (!username || !subscription) {
+      return c.json({ success: false, error: "username e subscription obrigatórios" }, 400);
+    }
+
+    console.log(`[PUSH] Subscribing device for user: ${username}`);
+
+    // Get existing subscriptions for this user
+    const subscriptions = await kv.get(`push:subscriptions:${username}`) || [];
+
+    // Check if this endpoint already exists (avoid duplicates)
+    const exists = subscriptions.some(
+      (s: any) => s.endpoint === subscription.endpoint
+    );
+
+    if (!exists) {
+      subscriptions.push(subscription);
+      await kv.set(`push:subscriptions:${username}`, subscriptions);
+      console.log(`[PUSH] ✅ New device subscribed for ${username} (total: ${subscriptions.length})`);
+    } else {
+      // Update the existing subscription (keys may have changed)
+      const idx = subscriptions.findIndex((s: any) => s.endpoint === subscription.endpoint);
+      subscriptions[idx] = subscription;
+      await kv.set(`push:subscriptions:${username}`, subscriptions);
+      console.log(`[PUSH] ♻️ Device subscription updated for ${username}`);
+    }
+
+    return c.json({ success: true, deviceCount: subscriptions.length });
+  } catch (error) {
+    console.error("❌ Erro ao registrar push subscription:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Unsubscribe a device
+app.post("/make-server-42377006/push/unsubscribe", async (c) => {
+  try {
+    const { username, endpoint } = await c.req.json();
+    if (!username) {
+      return c.json({ success: false, error: "username obrigatório" }, 400);
+    }
+
+    const subscriptions = await kv.get(`push:subscriptions:${username}`) || [];
+    
+    if (endpoint) {
+      // Remove specific device
+      const filtered = subscriptions.filter((s: any) => s.endpoint !== endpoint);
+      await kv.set(`push:subscriptions:${username}`, filtered);
+      console.log(`[PUSH] Device unsubscribed for ${username} (remaining: ${filtered.length})`);
+    } else {
+      // Remove all devices
+      await kv.del(`push:subscriptions:${username}`);
+      console.log(`[PUSH] All devices unsubscribed for ${username}`);
+    }
+
+    return c.json({ success: true });
+  } catch (error) {
+    console.error("❌ Erro ao remover push subscription:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Send push notification to a specific user (manual trigger)
+app.post("/make-server-42377006/push/send", async (c) => {
+  try {
+    const { targetUsername, title, body, url, tag } = await c.req.json();
+    if (!targetUsername || !title) {
+      return c.json({ success: false, error: "targetUsername e title obrigatórios" }, 400);
+    }
+
+    const result = await sendPushToUser(targetUsername, {
+      title,
+      body: body || "",
+      tag: tag || `manual-${Date.now()}`,
+      data: { url: url || "/" },
+    });
+
+    return c.json({ success: true, ...result });
+  } catch (error) {
+    console.error("❌ Erro ao enviar push notification:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Broadcast push to all users of a specific role
+app.post("/make-server-42377006/push/broadcast", async (c) => {
+  try {
+    const { role, title, body, url } = await c.req.json();
+    if (!title) {
+      return c.json({ success: false, error: "title obrigatório" }, 400);
+    }
+
+    let usernames: string[] = [];
+    if (role) {
+      usernames = await kv.get(`users:${role}`) || [];
+    } else {
+      // Send to everyone
+      const vendedores = await kv.get("users:vendedor") || [];
+      const clientes = await kv.get("users:cliente") || [];
+      const motoristas = await kv.get("users:motorista") || [];
+      usernames = [...vendedores, ...clientes, ...motoristas, "admin"];
+    }
+
+    let totalSent = 0;
+    let totalFailed = 0;
+
+    for (const username of usernames) {
+      const result = await sendPushToUser(username, {
+        title,
+        body: body || "",
+        tag: `broadcast-${Date.now()}`,
+        data: { url: url || "/" },
+      });
+      totalSent += result.sent;
+      totalFailed += result.failed;
+    }
+
+    console.log(`[PUSH BROADCAST] ${totalSent} sent, ${totalFailed} failed to ${usernames.length} users`);
+    return c.json({ success: true, sent: totalSent, failed: totalFailed, users: usernames.length });
+  } catch (error) {
+    console.error("❌ Erro ao enviar broadcast:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Get push subscription stats for a user
+app.get("/make-server-42377006/push/status/:username", async (c) => {
+  try {
+    const username = c.req.param("username");
+    const subscriptions = await kv.get(`push:subscriptions:${username}`) || [];
+    return c.json({
+      success: true,
+      subscribed: subscriptions.length > 0,
+      deviceCount: subscriptions.length,
+    });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ==================== DETAILED ADMIN METRICS (for charts) ====================
+app.get("/make-server-42377006/metrics/admin/detailed", async (c) => {
+  try {
+    const vendedorUsernames = await kv.get("users:vendedor") || [];
+    const today = new Date();
+
+    // Per-vendor breakdown
+    const vendorBreakdown: any[] = [];
+    const dailySalesMap: Record<string, { total: number; orders: number; pix: number }> = {};
+
+    // Initialize last 7 days
+    for (let d = 6; d >= 0; d--) {
+      const date = new Date(today);
+      date.setDate(date.getDate() - d);
+      const key = date.toISOString().split("T")[0];
+      dailySalesMap[key] = { total: 0, orders: 0, pix: 0 };
+    }
+
+    let totalRevenue = 0;
+    let totalAdminTax = 0;
+    let totalVendorNet = 0;
+    let totalFixedFee = 0;
+    let totalOrders = 0;
+    let totalPix = 0;
+
+    for (const vUsername of vendedorUsernames) {
+      const vendorUser = await kv.get(`user:${vUsername}`);
+      if (!vendorUser) continue;
+      const rate = vendorUser.adminCommissionRate !== undefined ? vendorUser.adminCommissionRate : 15;
+      const rateDecimal = rate / 100;
+
+      const orders = await kv.get(`orders:vendor:${vUsername}`) || [];
+      const directPix = await kv.get(`pix_direct_sales:${vUsername}`) || [];
+      const createdBy = await kv.get(`created_by:${vUsername}`) || [];
+
+      let vendorSales = 0;
+      let vendorOrderCount = 0;
+      const vendorPixCount = directPix.length;
+
+      for (const order of orders) {
+        if (order.status !== "cancelled" && order.paymentStatus === "paid") {
+          vendorSales += order.total || 0;
+          vendorOrderCount++;
+          const dateKey = (order.createdAt || "").split("T")[0];
+          if (dailySalesMap[dateKey]) {
+            dailySalesMap[dateKey].total += order.total || 0;
+            dailySalesMap[dateKey].orders++;
+          }
+        }
+      }
+
+      for (const sale of directPix) {
+        vendorSales += sale.amount || 0;
+        const dateKey = (sale.createdAt || "").split("T")[0];
+        if (dailySalesMap[dateKey]) {
+          dailySalesMap[dateKey].total += sale.amount || 0;
+          dailySalesMap[dateKey].pix++;
+        }
+      }
+
+      const adminTax = vendorSales * rateDecimal;
+      const fixedFees = (vendorOrderCount + vendorPixCount) * 0.99;
+      const vendorNet = vendorSales - adminTax - fixedFees;
+
+      vendorBreakdown.push({
+        username: vUsername,
+        name: vendorUser.name || vUsername,
+        photo: vendorUser.photo || "",
+        rate,
+        totalSales: vendorSales,
+        adminTax,
+        fixedFees,
+        vendorNet: Math.max(0, vendorNet),
+        orderCount: vendorOrderCount,
+        pixCount: vendorPixCount,
+        clientCount: createdBy.filter((u: any) => u.role === "cliente").length,
+        driverCount: createdBy.filter((u: any) => u.role === "motorista").length,
+      });
+
+      totalRevenue += vendorSales;
+      totalAdminTax += adminTax;
+      totalFixedFee += fixedFees;
+      totalVendorNet += Math.max(0, vendorNet);
+      totalOrders += vendorOrderCount;
+      totalPix += vendorPixCount;
+    }
+
+    const dailySales = Object.entries(dailySalesMap)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, data]) => ({
+        date,
+        label: new Date(date + "T12:00:00").toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit" }),
+        ...data,
+      }));
+
+    const commissionPie = [
+      { name: "Taxa Admin", value: Math.round(totalAdminTax * 100) / 100, color: "#00f0ff" },
+      { name: "Taxa Fixa (R$0,99)", value: Math.round(totalFixedFee * 100) / 100, color: "#8b5cf6" },
+      { name: "Liquido Vendedores", value: Math.round(totalVendorNet * 100) / 100, color: "#00ff41" },
+    ];
+
+    return c.json({
+      success: true,
+      detailed: {
+        vendorBreakdown,
+        dailySales,
+        commissionPie,
+        totals: {
+          revenue: totalRevenue,
+          adminTax: totalAdminTax,
+          fixedFees: totalFixedFee,
+          vendorNet: totalVendorNet,
+          orders: totalOrders,
+          pixSales: totalPix,
+          vendors: vendedorUsernames.length,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("❌ Erro nas métricas detalhadas:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ==================== CHAT UNREAD COUNTS ====================
+app.get("/make-server-42377006/chat/unread/:username", async (c) => {
+  try {
+    const username = c.req.param("username");
+    if (!username) return c.json({ success: false, error: "Missing username" }, 400);
+
+    const userData = await kv.get(`user:${username}`);
+    if (!userData) return c.json({ success: false, error: "User not found" }, 404);
+
+    const contactUsernames: string[] = [];
+    if (userData.role === "admin") {
+      const vendedores = await kv.get("users:vendedor") || [];
+      contactUsernames.push(...vendedores);
+    } else if (userData.role === "vendedor") {
+      contactUsernames.push("admin");
+      const createdBy = await kv.get(`created_by:${username}`) || [];
+      for (const u of createdBy) {
+        if (u.username) contactUsernames.push(u.username);
+      }
+    } else if (userData.role === "cliente" || userData.role === "motorista") {
+      if (userData.createdBy) contactUsernames.push(userData.createdBy);
+    }
+
+    const unreadCounts: Record<string, number> = {};
+    for (const contact of contactUsernames) {
+      const chatKey = [username, contact].sort().join(":");
+      const messages = await kv.get(`chat:${chatKey}`) || [];
+      const unread = messages.filter((m: any) => m.from === contact && !m.read).length;
+      if (unread > 0) {
+        unreadCounts[contact] = unread;
+      }
+    }
+
+    return c.json({ success: true, unreadCounts });
+  } catch (error) {
+    console.error("Erro unread counts:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ==================== DETAILED ADMIN METRICS WITH PERIOD ====================
+app.get("/make-server-42377006/metrics/admin/detailed/:days", async (c) => {
+  try {
+    const days = Math.min(90, Math.max(1, parseInt(c.req.param("days") || "7")));
+    const vendedorUsernames = await kv.get("users:vendedor") || [];
+    const today = new Date();
+
+    const vendorBreakdown: any[] = [];
+    const dailySalesMap: Record<string, { total: number; orders: number; pix: number }> = {};
+
+    for (let d = days - 1; d >= 0; d--) {
+      const date = new Date(today);
+      date.setDate(date.getDate() - d);
+      const key = date.toISOString().split("T")[0];
+      dailySalesMap[key] = { total: 0, orders: 0, pix: 0 };
+    }
+
+    const startDate = new Date(today);
+    startDate.setDate(startDate.getDate() - days);
+    const startStr = startDate.toISOString().split("T")[0];
+
+    let totalRevenue = 0, totalAdminTax = 0, totalVendorNet = 0, totalFixedFee = 0, totalOrders = 0, totalPix = 0;
+
+    for (const vUsername of vendedorUsernames) {
+      const vendorUser = await kv.get(`user:${vUsername}`);
+      if (!vendorUser) continue;
+      const rate = vendorUser.adminCommissionRate !== undefined ? vendorUser.adminCommissionRate : 15;
+      const rateDecimal = rate / 100;
+
+      const orders = await kv.get(`orders:vendor:${vUsername}`) || [];
+      const directPix = await kv.get(`pix_direct_sales:${vUsername}`) || [];
+      const createdBy = await kv.get(`created_by:${vUsername}`) || [];
+
+      let vendorSales = 0, vendorOrderCount = 0, vendorPixCount = 0;
+
+      for (const order of orders) {
+        if (order.status !== "cancelled" && order.paymentStatus === "paid") {
+          const dateKey = (order.createdAt || "").split("T")[0];
+          if (dateKey >= startStr) {
+            vendorSales += order.total || 0;
+            vendorOrderCount++;
+            if (dailySalesMap[dateKey]) {
+              dailySalesMap[dateKey].total += order.total || 0;
+              dailySalesMap[dateKey].orders++;
+            }
+          }
+        }
+      }
+
+      for (const sale of directPix) {
+        const dateKey = (sale.createdAt || "").split("T")[0];
+        if (dateKey >= startStr) {
+          vendorSales += sale.amount || 0;
+          vendorPixCount++;
+          if (dailySalesMap[dateKey]) {
+            dailySalesMap[dateKey].total += sale.amount || 0;
+            dailySalesMap[dateKey].pix++;
+          }
+        }
+      }
+
+      const adminTax = vendorSales * rateDecimal;
+      const fixedFees = (vendorOrderCount + vendorPixCount) * 0.99;
+      const vendorNet = vendorSales - adminTax - fixedFees;
+
+      if (vendorSales > 0 || vendorOrderCount > 0) {
+        vendorBreakdown.push({
+          username: vUsername, name: vendorUser.name || vUsername, photo: vendorUser.photo || "", rate,
+          totalSales: vendorSales, adminTax, fixedFees, vendorNet: Math.max(0, vendorNet),
+          orderCount: vendorOrderCount, pixCount: vendorPixCount,
+          clientCount: createdBy.filter((u: any) => u.role === "cliente").length,
+          driverCount: createdBy.filter((u: any) => u.role === "motorista").length,
+        });
+      }
+
+      totalRevenue += vendorSales; totalAdminTax += adminTax; totalFixedFee += fixedFees;
+      totalVendorNet += Math.max(0, vendorNet); totalOrders += vendorOrderCount; totalPix += vendorPixCount;
+    }
+
+    const dailySales = Object.entries(dailySalesMap)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, data]) => ({
+        date,
+        label: days <= 7
+          ? new Date(date + "T12:00:00").toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit" })
+          : new Date(date + "T12:00:00").toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" }),
+        ...data,
+      }));
+
+    const commissionPie = [
+      { name: "Taxa Admin", value: Math.round(totalAdminTax * 100) / 100, color: "#00f0ff" },
+      { name: "Taxa Fixa (R$0,99)", value: Math.round(totalFixedFee * 100) / 100, color: "#8b5cf6" },
+      { name: "Liquido Vendedores", value: Math.round(totalVendorNet * 100) / 100, color: "#00ff41" },
+    ];
+
+    return c.json({
+      success: true,
+      detailed: {
+        vendorBreakdown, dailySales, commissionPie,
+        totals: { revenue: totalRevenue, adminTax: totalAdminTax, fixedFees: totalFixedFee, vendorNet: totalVendorNet, orders: totalOrders, pixSales: totalPix, vendors: vendedorUsernames.length },
+        period: days,
+      },
+    });
+  } catch (error) {
+    console.error("Erro metricas periodo:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ==================== PWA DIAGNOSTICS ====================
+// Comprehensive PWA health check — VAPID, push subscriptions, SW status
+app.get("/make-server-42377006/pwa/diagnostics", async (c) => {
+  try {
+    await ensureVapidSetup();
+    const keys = await getOrCreateVapidKeys();
+
+    // Count total push subscriptions
+    const vendedores = await kv.get("users:vendedor") || [];
+    const clientes = await kv.get("users:cliente") || [];
+    const motoristas = await kv.get("users:motorista") || [];
+    const allUsers = ["admin", ...vendedores, ...clientes, ...motoristas];
+
+    let totalSubscriptions = 0;
+    let usersWithPush = 0;
+    const pushDetails: any[] = [];
+
+    for (const username of allUsers) {
+      const subs = await kv.get(`push:subscriptions:${username}`) || [];
+      if (subs.length > 0) {
+        usersWithPush++;
+        totalSubscriptions += subs.length;
+        pushDetails.push({
+          username,
+          devices: subs.length,
+          endpoints: subs.map((s: any) => (s.endpoint || "").substring(0, 60) + "..."),
+        });
+      }
+    }
+
+    return c.json({
+      success: true,
+      diagnostics: {
+        vapid: {
+          configured: true,
+          publicKey: keys.publicKey,
+          publicKeyPreview: keys.publicKey.substring(0, 20) + "...",
+        },
+        push: {
+          totalUsers: allUsers.length,
+          usersWithPush,
+          totalSubscriptions,
+          details: pushDetails,
+        },
+        server: {
+          version: "v3",
+          timestamp: new Date().toISOString(),
+          pushLibrary: "web-push",
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Erro diagnostics PWA:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Test push notification — sends a test push to a specific user
+app.post("/make-server-42377006/push/test", async (c) => {
+  try {
+    const { targetUsername } = await c.req.json();
+    if (!targetUsername) {
+      return c.json({ success: false, error: "targetUsername obrigatorio" }, 400);
+    }
+
+    const subs = await kv.get(`push:subscriptions:${targetUsername}`) || [];
+    if (subs.length === 0) {
+      return c.json({
+        success: false,
+        error: `Usuario ${targetUsername} nao tem dispositivos registrados para push`,
+        hint: "O usuario precisa abrir o app e permitir notificacoes primeiro",
+      });
+    }
+
+    const result = await sendPushToUser(targetUsername, {
+      title: "Teste de Notificacao!",
+      body: `Esta e uma notificacao de teste do NeonDelivery. Se voce esta vendo isso, push esta funcionando! (${new Date().toLocaleTimeString("pt-BR")})`,
+      tag: `push-test-${Date.now()}`,
+      data: { url: "/", type: "push_test" },
+      vibrate: [200, 100, 200, 100, 200],
+    });
+
+    return c.json({
+      success: true,
+      message: `Notificacao de teste enviada para ${targetUsername}`,
+      ...result,
+      devicesRegistered: subs.length,
+    });
+  } catch (error) {
+    console.error("Erro ao enviar push test:", error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Force re-initialize VAPID keys (useful if keys got corrupted)
+app.post("/make-server-42377006/push/reset-vapid", async (c) => {
+  try {
+    console.log("Force resetting VAPID keys...");
+    vapidInitialized = false;
+
+    const newKeys = webpush.generateVAPIDKeys();
+    const keys = {
+      publicKey: newKeys.publicKey,
+      privateKey: newKeys.privateKey,
+    };
+    await kv.set("config:vapid_keys", keys);
+
+    webpush.setVapidDetails(
+      "mailto:neondelivery@app.com",
+      keys.publicKey,
+      keys.privateKey
+    );
+    vapidInitialized = true;
+
+    console.log("New VAPID keys generated. Users will need to re-subscribe.");
+
+    return c.json({
+      success: true,
+      message: "VAPID keys regenerated. All users need to re-subscribe.",
+      publicKey: keys.publicKey,
+    });
+  } catch (error) {
+    console.error("Erro ao resetar VAPID:", error);
     return c.json({ success: false, error: String(error) }, 500);
   }
 });

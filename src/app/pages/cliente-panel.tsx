@@ -22,6 +22,7 @@ import { useUserCreator } from "../hooks/useUserCreator";
 import * as api from "../services/api";
 import * as sfx from "../services/sounds";
 import { ChatPanel } from "../components/chat-panel";
+import { NotificationBell } from "../components/notification-bell";
 
 const getAvatarText = (text: string | null | undefined): string => {
   if (!text || typeof text !== "string") return "??";
@@ -301,7 +302,8 @@ export function ClientePanel() {
             <p className="text-gray-500 text-xs truncate">Vendedor: <span className="text-[#00f0ff]">{vendedor.name}</span></p>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
+          <NotificationBell />
           {cartCount > 0 && (
             <motion.button whileTap={{ scale: 0.9 }} onClick={() => setShowCart(true)}
               className="relative p-2.5 rounded-xl bg-[#00f0ff]/15 text-[#00f0ff]">

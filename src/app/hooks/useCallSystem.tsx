@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import * as api from "../services/api";
+import { notifyIncomingCall } from "../services/notifications";
 
 export interface CallData {
   callId: string;
@@ -188,6 +189,7 @@ export function useCallSystem(currentUsername: string) {
       if (incoming && incoming.status === "ringing" && incoming.callId !== lastCallIdRef.current) {
         lastCallIdRef.current = incoming.callId;
         getRingtone().play();
+        notifyIncomingCall(incoming.fromName || incoming.from, incoming.type);
         setCallState(prev => ({ ...prev, incomingCall: incoming }));
       } else if (incoming && incoming.status === "connected") {
         getRingtone().stop();

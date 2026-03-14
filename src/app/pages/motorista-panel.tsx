@@ -46,6 +46,9 @@ import {
 import { useUserCreator } from "../hooks/useUserCreator";
 import { useCallSystem } from "../hooks/useCallSystem";
 import { IncomingCallOverlay, ActiveCallOverlay } from "../components/call-overlays";
+import { MotoristaDashboardCharts } from "../components/motorista-charts";
+import { NotificationBell } from "../components/notification-bell";
+import * as notif from "../services/notifications";
 import * as api from "../services/api";
 import * as sfx from "../services/sounds";
 
@@ -570,6 +573,7 @@ export function MotoristaPanel() {
     try {
       await api.updateOrderStatus(order.id, { status: "delivering", vendorUsername: order.vendorUsername, clientUsername: order.clientUsername, driverUsername: currentUser.username });
       sfx.playSuccess();
+      notif.notifyOrderStatus("delivering", order.id);
       setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, status: "delivering", updatedAt: new Date().toISOString() } : o)));
     } catch (err: any) { sfx.playError(); alert("Erro: " + err.message); }
   };
@@ -578,6 +582,7 @@ export function MotoristaPanel() {
     try {
       await api.updateOrderStatus(order.id, { status: "delivered", vendorUsername: order.vendorUsername, clientUsername: order.clientUsername, driverUsername: currentUser.username });
       sfx.playSuccess();
+      notif.notifyOrderStatus("delivered", order.id);
       setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, status: "delivered", updatedAt: new Date().toISOString() } : o)));
       loadMetrics();
     } catch (err: any) { sfx.playError(); alert("Erro: " + err.message); }
@@ -588,6 +593,21 @@ export function MotoristaPanel() {
   const activeDeliveries = orders.filter((o) => o.status === "delivering");
   const completedDeliveries = orders.filter((o) => o.status === "delivered");
   const totalEarned = completedDeliveries.reduce((sum, o) => sum + calcCommission(o.total || 0).total, 0);
+
+  // Delivery data for charts (last 7 days)
+  const deliveryChartData = (() => {
+    const last7 = Array.from({ length: 7 }, (_, i) => {
+      const d = new Date();
+      d.setDate(d.getDate() - (6 - i));
+      return d.toISOString().split("T")[0];
+    });
+    return last7.map((date) => {
+      const dayOrders = completedDeliveries.filter((o: any) => (o.updatedAt || o.createdAt || "").startsWith(date));
+      const dayEarnings = dayOrders.reduce((sum: number, o: any) => sum + calcCommission(o.total || 0).total, 0);
+      const dayLabel = new Date(date + "T12:00:00").toLocaleDateString("pt-BR", { weekday: "short" }).slice(0, 3);
+      return { name: dayLabel, entregas: dayOrders.length, ganhos: Math.round(dayEarnings * 100) / 100 };
+    });
+  })();
 
   const vendedorChatContacts: ChatContact[] = vendedor
     ? [{ username: vendedor.username, name: vendedor.name || "Vendedor", photo: vendedor.photo || "", role: "vendedor" }]
@@ -644,9 +664,12 @@ export function MotoristaPanel() {
                 </p>
               </div>
             </div>
-            <motion.button onClick={() => setShowLogoutConfirm(true)} whileTap={{ scale: 0.9 }} className="p-2 rounded-xl bg-[#ff006e]/10 text-[#ff006e] shrink-0">
-              <LogOut className="w-4 h-4" />
-            </motion.button>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <NotificationBell />
+              <motion.button onClick={() => setShowLogoutConfirm(true)} whileTap={{ scale: 0.9 }} className="p-2 rounded-xl bg-[#ff006e]/10 text-[#ff006e]">
+                <LogOut className="w-4 h-4" />
+              </motion.button>
+            </div>
           </div>
         </div>
       )}
@@ -992,6 +1015,9 @@ export function MotoristaPanel() {
                   <p className="text-gray-500 text-[10px] uppercase">Entregas Feitas</p>
                 </motion.div>
               </div>
+
+              {/* Recharts-based delivery charts */}
+              <MotoristaDashboardCharts deliveryData={deliveryChartData} metrics={metrics} />
 
               {/* Commission Config Display */}
               <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}

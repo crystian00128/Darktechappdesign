@@ -2,6 +2,7 @@ import { ReactNode, useState, useRef, useCallback, useMemo, useEffect } from "re
 import { motion, AnimatePresence } from "motion/react";
 import { LogOut, Menu, X, ChevronLeft } from "lucide-react";
 import { useNavigate } from "react-router";
+import { NotificationBell } from "./notification-bell";
 
 interface MenuItem {
   icon: ReactNode;
@@ -309,6 +310,11 @@ export function SidebarLayout({
           </div>
 
           {headerAction}
+
+          {/* Notification Bell */}
+          <div className="ml-2">
+            <NotificationBell />
+          </div>
 
           {/* Online status dot */}
           <motion.div
