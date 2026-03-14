@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 
 interface ProtectedRouteProps {
@@ -8,12 +8,12 @@ interface ProtectedRouteProps {
 
 export function ProtectedRoute({ children, requiredType }: ProtectedRouteProps) {
   const navigate = useNavigate();
+  const [isAuthorized, setIsAuthorized] = useState(false);
 
   useEffect(() => {
     const currentUser = localStorage.getItem("currentUser");
     
     if (!currentUser) {
-      // Não está autenticado, redireciona para login
       navigate("/");
       return;
     }
@@ -21,18 +21,27 @@ export function ProtectedRoute({ children, requiredType }: ProtectedRouteProps) 
     try {
       const user = JSON.parse(currentUser);
       
-      // Verifica se o tipo do usuário corresponde ao tipo necessário da rota
-      if (requiredType && user.tipo !== requiredType) {
-        // Usuário não tem permissão para esta rota
-        navigate("/");
-        return;
+      const userRole = user.role || user.tipo;
+      // Allow admin to view vendedor panel via adminViewing flag
+      if (requiredType && userRole !== requiredType) {
+        if (user.adminViewing && requiredType === "vendedor") {
+          // Admin is viewing vendedor panel - allow access
+        } else {
+          navigate("/");
+          return;
+        }
       }
+      
+      setIsAuthorized(true);
     } catch (error) {
-      // Erro ao parsear usuário, redireciona para login
       localStorage.removeItem("currentUser");
       navigate("/");
     }
   }, [navigate, requiredType]);
+
+  if (!isAuthorized) {
+    return null;
+  }
 
   return <>{children}</>;
 }

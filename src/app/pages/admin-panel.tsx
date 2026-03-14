@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router";
 import { SidebarLayout } from "../components/sidebar-layout";
 import { StatCard } from "../components/stat-card";
@@ -16,615 +16,1179 @@ import {
   ChevronUp,
   Copy,
   Check,
-  LogOut,
+  RefreshCw,
+  Link2,
+  UserPlus,
+  Clock,
+  CheckCircle2,
+  GitBranch,
+  Trash2,
+  ExternalLink,
+  AlertTriangle,
+  Zap,
+  Minus,
+  Plus,
+  Loader2,
 } from "lucide-react";
-import { motion } from "motion/react";
-import {
-  LineChart,
-  Line,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-} from "recharts";
+import { motion, AnimatePresence } from "motion/react";
 import * as api from "../services/api";
+import * as sfx from "../services/sounds";
+import { PixwavePanel } from "../components/pixwave-panel";
+
+// Neon glow text component
+function NeonText({ children, color = "#00f0ff", className = "" }: { children: React.ReactNode; color?: string; className?: string }) {
+  return (
+    <motion.span
+      className={className}
+      style={{ color }}
+      animate={{ textShadow: [`0 0 6px ${color}40`, `0 0 14px ${color}60`, `0 0 6px ${color}40`] }}
+      transition={{ duration: 2.5, repeat: Infinity }}
+    >
+      {children}
+    </motion.span>
+  );
+}
+
+// Futuristic card wrapper
+function GlowCard({ children, className = "", glowColor = "#00f0ff" }: { children: React.ReactNode; className?: string; glowColor?: string }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      className={`relative rounded-2xl overflow-hidden ${className}`}
+    >
+      <motion.div
+        className="absolute inset-0 rounded-2xl p-[1px]"
+        style={{ background: `conic-gradient(from 0deg, ${glowColor}20, transparent, ${glowColor}10, transparent)` }}
+        animate={{ rotate: [0, 360] }}
+        transition={{ duration: 15, repeat: Infinity, ease: "linear" }}
+      />
+      <div className="relative bg-[#0c0c14]/90 backdrop-blur-xl rounded-2xl border border-[#1f1f2e]/50 m-[1px]">
+        {children}
+      </div>
+    </motion.div>
+  );
+}
+
+// Avatar with rotating green neon border
+function NeonAvatar({ photo, name, size = "md" }: { photo?: string; name?: string; size?: "sm" | "md" | "lg" }) {
+  const sizeMap = {
+    sm: { outer: "w-10 h-10", inner: "inset-[2px]", text: "text-sm", dot: "w-2.5 h-2.5 -bottom-0.5 -right-0.5 border-[2px]" },
+    md: { outer: "w-12 h-12", inner: "inset-[2px]", text: "text-base", dot: "w-3 h-3 bottom-0 right-0 border-2" },
+    lg: { outer: "w-14 h-14", inner: "inset-[3px]", text: "text-lg", dot: "w-3.5 h-3.5 bottom-0 right-0 border-2" },
+  };
+  const s = sizeMap[size];
+  const initial = name && name.length > 0 ? name.charAt(0).toUpperCase() : "?";
+
+  return (
+    <div className={`relative ${s.outer}`}>
+      <motion.div
+        className="absolute inset-0 rounded-full"
+        style={{ background: "conic-gradient(from 0deg, #00ff41, #00f0ff, #00ff41, transparent, #00ff41)" }}
+        animate={{ rotate: [0, 360] }}
+        transition={{ duration: 4, repeat: Infinity, ease: "linear" }}
+      />
+      <motion.div
+        className="absolute inset-[-2px] rounded-full pointer-events-none"
+        animate={{
+          boxShadow: [
+            "0 0 8px rgba(0,255,65,0.2), 0 0 16px rgba(0,255,65,0.1)",
+            "0 0 14px rgba(0,255,65,0.4), 0 0 28px rgba(0,255,65,0.15)",
+            "0 0 8px rgba(0,255,65,0.2), 0 0 16px rgba(0,255,65,0.1)",
+          ],
+        }}
+        transition={{ duration: 2, repeat: Infinity }}
+      />
+      <div className={`absolute ${s.inner} rounded-full bg-[#0c0c14] flex items-center justify-center overflow-hidden`}>
+        {photo ? (
+          <img src={photo} alt={name} className="w-full h-full object-cover rounded-full" />
+        ) : (
+          <div className="w-full h-full rounded-full bg-gradient-to-br from-[#00f0ff]/30 to-[#8b5cf6]/20 flex items-center justify-center">
+            <span className={`${s.text} font-bold text-white`}>{initial}</span>
+          </div>
+        )}
+      </div>
+      <motion.div
+        className={`absolute ${s.dot} bg-[#00ff41] rounded-full border-[#0c0c14]`}
+        animate={{ scale: [1, 1.3, 1], boxShadow: ["0 0 3px rgba(0,255,65,0.5)", "0 0 8px rgba(0,255,65,0.8)", "0 0 3px rgba(0,255,65,0.5)"] }}
+        transition={{ duration: 1.5, repeat: Infinity }}
+      />
+    </div>
+  );
+}
 
 export function AdminPanel() {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState("dashboard");
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<string | false>(false);
   const [expandedVendor, setExpandedVendor] = useState<string | null>(null);
-  const [generatedCodes, setGeneratedCodes] = useState<Array<{
-    code: string;
-    type: string;
-    used: boolean;
-    generatedAt: string;
-  }>>([]);
   const [loading, setLoading] = useState(false);
-  const [vendedores, setVendedores] = useState<any[]>([]);
-  const [salesData] = useState<any[]>([]);
+  const [hierarchy, setHierarchy] = useState<any>(null);
+  const [repairMessage, setRepairMessage] = useState("");
+  const [metrics, setMetrics] = useState<any>({});
+  const [deleteConfirm, setDeleteConfirm] = useState<any>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [vendorRates, setVendorRates] = useState<Record<string, number>>({});
+  const [savingRate, setSavingRate] = useState<string | null>(null);
 
-  // Helper para renderizar avatar com segurança
-  const renderAvatar = (user: any) => {
-    if (user?.photo) return user.photo;
-    if (user?.name && typeof user.name === 'string' && user.name.length > 0) {
-      return user.name.charAt(0).toUpperCase();
+  const loadHierarchy = useCallback(async () => {
+    try {
+      const res = await api.getHierarchy();
+      if (res.success) setHierarchy(res.hierarchy);
+    } catch (err) {
+      console.error("Erro ao carregar hierarquia:", err);
     }
-    return "V";
-  };
-
-  // Carregar vendedores ao montar componente
-  useEffect(() => {
-    loadVendedores();
   }, []);
 
-  const loadVendedores = async () => {
+  const loadMetrics = useCallback(async () => {
     try {
-      console.log("📥 Carregando vendedores...");
-      const response = await api.getUsers("vendedor");
-      console.log("✅ Vendedores carregados:", response.users);
-      setVendedores(response.users || []);
-    } catch (error: any) {
-      console.error("❌ Erro ao carregar vendedores:", error);
+      const res = await api.getMetrics("admin");
+      if (res.success) setMetrics(res.metrics || {});
+    } catch (err) {
+      console.error("Erro ao carregar metricas:", err);
     }
+  }, []);
+
+  useEffect(() => {
+    loadHierarchy();
+    loadMetrics();
+  }, [loadHierarchy, loadMetrics]);
+
+  useEffect(() => {
+    const interval = setInterval(() => { loadHierarchy(); loadMetrics(); }, 10000);
+    return () => clearInterval(interval);
+  }, [loadHierarchy, loadMetrics]);
+
+  const vendedores = hierarchy?.vendedores || [];
+  const adminStats = hierarchy?.admin?.stats || {};
+
+  // Load commission rates for all vendors
+  useEffect(() => {
+    if (!vendedores.length) return;
+    const loadRates = async () => {
+      const rates: Record<string, number> = {};
+      for (const v of vendedores) {
+        try {
+          const r = await api.getVendorCommission(v.username);
+          if (r.success) rates[v.username] = r.rate;
+          else rates[v.username] = 15;
+        } catch { rates[v.username] = 15; }
+      }
+      setVendorRates(rates);
+    };
+    loadRates();
+  }, [vendedores.length]);
+
+  const handleSaveRate = async (username: string) => {
+    const rate = vendorRates[username];
+    if (rate === undefined) return;
+    setSavingRate(username);
+    try {
+      const r = await api.setVendorCommission(username, rate);
+      if (r.success) sfx.playSuccess();
+      else sfx.playError();
+    } catch { sfx.playError(); }
+    finally { setSavingRate(null); }
   };
+  const adminCodes = hierarchy?.admin?.codesGenerated || [];
 
   const menuItems = [
     { icon: <LayoutDashboard className="w-5 h-5" />, label: "Dashboard", id: "dashboard" },
-    { icon: <Users className="w-5 h-5" />, label: "Usuários", id: "usuarios" },
-    { icon: <Ticket className="w-5 h-5" />, label: "Código de Convite", id: "convite" },
-    { icon: <Percent className="w-5 h-5" />, label: "Taxa Admin", id: "taxa" },
-    { icon: <Shield className="w-5 h-5" />, label: "Segurança", id: "seguranca" },
+    { icon: <Users className="w-5 h-5" />, label: "Hierarquia", id: "hierarquia" },
+    { icon: <Ticket className="w-5 h-5" />, label: "Convites", id: "convite" },
+    { icon: <Percent className="w-5 h-5" />, label: "Taxa", id: "taxa" },
+    { icon: <Shield className="w-5 h-5" />, label: "Seguranca", id: "seguranca" },
     { icon: <Key className="w-5 h-5" />, label: "API", id: "api" },
     { icon: <TrendingUp className="w-5 h-5" />, label: "Faturamento", id: "faturamento" },
-    { icon: <LogOut className="w-5 h-5" />, label: "Sair", id: "sair" },
   ];
 
   const copyToClipboard = (text: string) => {
-    // Usar método fallback que funciona em todos os ambientes
-    const textArea = document.createElement('textarea');
+    const textArea = document.createElement("textarea");
     textArea.value = text;
-    textArea.style.position = 'fixed';
-    textArea.style.left = '-9999px';
-    textArea.style.top = '0';
+    textArea.style.position = "fixed";
+    textArea.style.left = "-9999px";
     document.body.appendChild(textArea);
     textArea.focus();
     textArea.select();
-    
     try {
-      const successful = document.execCommand('copy');
-      if (successful) {
-        setCopied(true);
+      if (document.execCommand("copy")) {
+        setCopied(text);
         setTimeout(() => setCopied(false), 2000);
       }
     } catch (err) {
-      console.error('Erro ao copiar:', err);
+      console.error("Erro ao copiar:", err);
     }
-    
     document.body.removeChild(textArea);
   };
-
-  const fallbackCopyToClipboard = (text: string) => {
-    // Método removido - não é mais necessário
-    copyToClipboard(text);
-  };
-
-  useEffect(() => {
-    const fetchCodes = async () => {
-      try {
-        const response = await api.getInviteCodes("vendedor");
-        if (response.success) {
-          setGeneratedCodes(response.codes.map((code: any) => ({
-            code: code.code,
-            type: code.type,
-            used: code.used,
-            generatedAt: new Date(code.generatedAt).toLocaleDateString(),
-          })));
-        }
-      } catch (error) {
-        console.error("Erro ao buscar códigos:", error);
-      }
-    };
-
-    if (activeTab === "convite") {
-      fetchCodes();
-    }
-  }, [activeTab]);
 
   const handleGenerateCode = async () => {
     setLoading(true);
     try {
       const response = await api.generateInviteCode("vendedor", "admin");
-      
       if (response.success) {
-        const newCode = response.code;
-        copyToClipboard(newCode.code);
-        
-        // Adicionar à lista
-        setGeneratedCodes([
-          {
-            code: newCode.code,
-            type: newCode.type,
-            used: newCode.used,
-            generatedAt: new Date(newCode.generatedAt).toLocaleDateString(),
-          },
-          ...generatedCodes,
-        ]);
+        sfx.playCodeAccepted();
+        copyToClipboard(response.code.code);
+        await loadHierarchy();
       }
     } catch (error) {
+      sfx.playError();
       console.error("Erro ao gerar código:", error);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleLogout = () => {
-    // Limpar localStorage e redirecionar para login
-    localStorage.removeItem("currentUser");
-    navigate("/");
+  useEffect(() => {
+    if (activeTab === "convite" || activeTab === "hierarquia") loadHierarchy();
+  }, [activeTab]);
+
+  const formatDate = (dateStr: string) => {
+    if (!dateStr) return "-";
+    return new Date(dateStr).toLocaleDateString("pt-BR", {
+      day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit",
+    });
+  };
+
+  const handleDeleteVendor = async (vendorUsername: string) => {
+    setDeleting(true);
+    try {
+      const res = await api.deleteVendorCascade(vendorUsername);
+      if (res.success) {
+        sfx.playDelete();
+        setDeleteConfirm(null);
+        setExpandedVendor(null);
+        await loadHierarchy();
+        await loadMetrics();
+      }
+    } catch (err: any) {
+      sfx.playError();
+      console.error("Erro ao deletar vendedor:", err);
+      alert("Erro ao deletar: " + err.message);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleEnterVendorPanel = (vendedor: any) => {
+    const adminUser = JSON.parse(localStorage.getItem("currentUser") || "{}");
+    localStorage.setItem("adminOriginalSession", JSON.stringify(adminUser));
+    localStorage.setItem("currentUser", JSON.stringify({
+      username: vendedor.username,
+      name: vendedor.name || vendedor.username,
+      role: "vendedor",
+      photo: vendedor.photo || "",
+      createdAt: vendedor.createdAt,
+      adminViewing: true,
+    }));
+    navigate("/vendedor");
   };
 
   return (
-    <SidebarLayout
-      menuItems={menuItems}
-      activeTab={activeTab}
-      onTabChange={setActiveTab}
-      title="Painel Admin"
-    >
-      {/* Dashboard */}
+    <SidebarLayout menuItems={menuItems} activeTab={activeTab} onTabChange={(t) => { sfx.playNavigate(); setActiveTab(t); }} title="Painel Admin">
+      {/* ===================== DASHBOARD ===================== */}
       {activeTab === "dashboard" && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="space-y-8"
-        >
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-5">
           {/* Stats Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             <StatCard
-              title="Total Vendedores"
-              value="0"
-              icon={<Users className="w-6 h-6" />}
+              title="Vendedores"
+              value={String(adminStats.totalVendedores || metrics.totalVendedores || 0)}
+              icon={<Users className="w-full h-full" />}
               color="cyan"
               trend={{ value: 0, isPositive: true }}
             />
             <StatCard
-              title="Faturamento Total"
-              value="R$ 0"
-              icon={<DollarSign className="w-6 h-6" />}
+              title="Faturamento"
+              value={`R$ ${(metrics.totalSales || 0).toLocaleString()}`}
+              icon={<DollarSign className="w-full h-full" />}
               color="green"
               trend={{ value: 0, isPositive: true }}
             />
             <StatCard
-              title="Vendas Hoje"
-              value="0"
-              icon={<ShoppingBag className="w-6 h-6" />}
+              title="Pedidos"
+              value={String(metrics.totalOrders || 0)}
+              icon={<ShoppingBag className="w-full h-full" />}
               color="purple"
               trend={{ value: 0, isPositive: true }}
             />
             <StatCard
               title="Taxa Recebida"
-              value="R$ 0"
-              icon={<TrendingUp className="w-6 h-6" />}
+              value={`R$ ${(metrics.adminTax || 0).toLocaleString()}`}
+              icon={<TrendingUp className="w-full h-full" />}
               color="pink"
               trend={{ value: 0, isPositive: true }}
             />
           </div>
 
-          {/* Charts */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div className="bg-[#12121a] border border-[#1f1f2e] rounded-2xl p-6">
-              <h3 className="text-white font-bold text-lg mb-6">Vendas Mensais</h3>
-              {salesData.length > 0 ? (
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={salesData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1f1f2e" />
-                    <XAxis dataKey="name" stroke="#9ca3af" />
-                    <YAxis stroke="#9ca3af" />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: "#12121a",
-                        border: "1px solid #1f1f2e",
-                        borderRadius: "8px",
-                      }}
-                    />
-                    <Line
-                      key="vendas-line"
-                      type="monotone"
-                      dataKey="vendas"
-                      stroke="#00f0ff"
-                      strokeWidth={3}
-                      dot={{ fill: "#00f0ff", r: 5 }}
-                    />
-                    <Line
-                      key="admin-line"
-                      type="monotone"
-                      dataKey="admin"
-                      stroke="#8b5cf6"
-                      strokeWidth={3}
-                      dot={{ fill: "#8b5cf6", r: 5 }}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              ) : (
-                <div className="h-[300px] flex items-center justify-center text-gray-500">
-                  Nenhum dado disponível
+          {/* Summary Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <GlowCard glowColor="#00f0ff">
+              <div className="p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <motion.div
+                    className="p-2 bg-[#00f0ff]/15 rounded-lg"
+                    animate={{ boxShadow: ["0 0 8px rgba(0,240,255,0)", "0 0 12px rgba(0,240,255,0.3)", "0 0 8px rgba(0,240,255,0)"] }}
+                    transition={{ duration: 2, repeat: Infinity }}
+                  >
+                    <GitBranch className="w-4 h-4 text-[#00f0ff]" />
+                  </motion.div>
+                  <h3 className="text-white font-bold text-sm">Codigos</h3>
                 </div>
-              )}
-            </div>
+                <NeonText color="#00f0ff" className="text-3xl font-black block">
+                  {adminStats.totalCodesGenerated || 0}
+                </NeonText>
+                <div className="flex items-center gap-3 text-xs mt-1">
+                  <span className="text-[#00ff41] flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3" /> {adminStats.totalCodesUsed || 0}
+                  </span>
+                  <span className="text-[#ff9f00] flex items-center gap-1">
+                    <Clock className="w-3 h-3" /> {adminStats.totalCodesAvailable || 0}
+                  </span>
+                </div>
+              </div>
+            </GlowCard>
 
-            <div className="bg-[#12121a] border border-[#1f1f2e] rounded-2xl p-6">
-              <h3 className="text-white font-bold text-lg mb-6">Comparativo de Vendedores</h3>
-              {vendedores.length > 0 ? (
-                <ResponsiveContainer width="100%" height={300}>
-                  <BarChart data={vendedores}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1f1f2e" />
-                    <XAxis dataKey="nome" stroke="#9ca3af" />
-                    <YAxis stroke="#9ca3af" />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: "#12121a",
-                        border: "1px solid #1f1f2e",
-                        borderRadius: "8px",
-                      }}
-                    />
-                    <Bar key="vendas-bar-admin" dataKey="vendas" fill="#00f0ff" radius={[8, 8, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              ) : (
-                <div className="h-[300px] flex items-center justify-center text-gray-500">
-                  Nenhum vendedor cadastrado
+            <GlowCard glowColor="#8b5cf6">
+              <div className="p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <motion.div
+                    className="p-2 bg-[#8b5cf6]/15 rounded-lg"
+                    animate={{ boxShadow: ["0 0 8px rgba(139,92,246,0)", "0 0 12px rgba(139,92,246,0.3)", "0 0 8px rgba(139,92,246,0)"] }}
+                    transition={{ duration: 2, repeat: Infinity }}
+                  >
+                    <Users className="w-4 h-4 text-[#8b5cf6]" />
+                  </motion.div>
+                  <h3 className="text-white font-bold text-sm">Clientes</h3>
                 </div>
-              )}
-            </div>
+                <NeonText color="#8b5cf6" className="text-3xl font-black block">
+                  {adminStats.totalClientes || 0}
+                </NeonText>
+                <p className="text-gray-500 text-xs mt-1">Via vendedores</p>
+              </div>
+            </GlowCard>
+
+            <GlowCard glowColor="#ff00ff">
+              <div className="p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <motion.div
+                    className="p-2 bg-[#ff00ff]/15 rounded-lg"
+                    animate={{ boxShadow: ["0 0 8px rgba(255,0,255,0)", "0 0 12px rgba(255,0,255,0.3)", "0 0 8px rgba(255,0,255,0)"] }}
+                    transition={{ duration: 2, repeat: Infinity }}
+                  >
+                    <Users className="w-4 h-4 text-[#ff00ff]" />
+                  </motion.div>
+                  <h3 className="text-white font-bold text-sm">Motoristas</h3>
+                </div>
+                <NeonText color="#ff00ff" className="text-3xl font-black block">
+                  {adminStats.totalMotoristas || 0}
+                </NeonText>
+                <p className="text-gray-500 text-xs mt-1">Via vendedores</p>
+              </div>
+            </GlowCard>
+          </div>
+
+          {/* Charts */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <GlowCard>
+              <div className="p-4">
+                <h3 className="text-white font-bold text-base mb-4">
+                  <NeonText>Vendas Mensais</NeonText>
+                </h3>
+                <div className="h-[200px] flex items-center justify-center">
+                  <div className="text-center">
+                    <motion.div
+                      animate={{ opacity: [0.3, 0.6, 0.3] }}
+                      transition={{ duration: 3, repeat: Infinity }}
+                    >
+                      <ShoppingBag className="w-8 h-8 text-gray-700 mx-auto mb-2" />
+                    </motion.div>
+                    <p className="text-gray-600 text-xs">Nenhum dado disponivel</p>
+                  </div>
+                </div>
+              </div>
+            </GlowCard>
+
+            <GlowCard glowColor="#ff00ff">
+              <div className="p-4">
+                <h3 className="text-white font-bold text-base mb-4">
+                  <NeonText color="#ff00ff">Comparativo Vendedores</NeonText>
+                </h3>
+                {vendedores.length > 0 ? (
+                  <div className="h-[200px] flex flex-col justify-end">
+                    <div className="flex items-center gap-3 mb-3">
+                      <div className="flex items-center gap-1">
+                        <div className="w-2.5 h-2.5 rounded-sm bg-[#00f0ff]" />
+                        <span className="text-gray-500 text-[10px]">Clientes</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <div className="w-2.5 h-2.5 rounded-sm bg-[#ff00ff]" />
+                        <span className="text-gray-500 text-[10px]">Motoristas</span>
+                      </div>
+                    </div>
+                    <div className="flex-1 flex items-end gap-2 overflow-x-auto pb-1">
+                      {vendedores.map((v: any, idx: number) => {
+                        const clientes = v.stats?.totalClientes || 0;
+                        const motoristas = v.stats?.totalMotoristas || 0;
+                        const maxVal = Math.max(1, ...vendedores.map((vv: any) => Math.max(vv.stats?.totalClientes || 0, vv.stats?.totalMotoristas || 0)));
+                        return (
+                          <div key={`bar-${v.username}-${idx}`} className="flex-1 min-w-[44px] flex flex-col items-center gap-0.5">
+                            <div className="flex items-end gap-1 w-full justify-center" style={{ height: "120px" }}>
+                              <motion.div
+                                initial={{ height: 0 }}
+                                animate={{ height: `${Math.max(8, (clientes / maxVal) * 100)}%` }}
+                                transition={{ duration: 0.6, delay: idx * 0.1 }}
+                                className="w-5 rounded-t-lg relative group"
+                                style={{ background: "linear-gradient(to top, #00f0ff80, #00f0ff)" }}
+                                title={`Clientes: ${clientes}`}
+                              >
+                                <motion.div
+                                  className="absolute inset-0 rounded-t-lg"
+                                  animate={{ boxShadow: ["0 0 4px rgba(0,240,255,0.3)", "0 0 10px rgba(0,240,255,0.5)", "0 0 4px rgba(0,240,255,0.3)"] }}
+                                  transition={{ duration: 2, repeat: Infinity }}
+                                />
+                                <div className="absolute -top-5 left-1/2 -translate-x-1/2 text-[#00f0ff] text-[9px] font-bold opacity-0 group-hover:opacity-100 transition-opacity">
+                                  {clientes}
+                                </div>
+                              </motion.div>
+                              <motion.div
+                                initial={{ height: 0 }}
+                                animate={{ height: `${Math.max(8, (motoristas / maxVal) * 100)}%` }}
+                                transition={{ duration: 0.6, delay: idx * 0.1 + 0.05 }}
+                                className="w-5 rounded-t-lg relative group"
+                                style={{ background: "linear-gradient(to top, #ff00ff80, #ff00ff)" }}
+                                title={`Motoristas: ${motoristas}`}
+                              >
+                                <motion.div
+                                  className="absolute inset-0 rounded-t-lg"
+                                  animate={{ boxShadow: ["0 0 4px rgba(255,0,255,0.3)", "0 0 10px rgba(255,0,255,0.5)", "0 0 4px rgba(255,0,255,0.3)"] }}
+                                  transition={{ duration: 2, repeat: Infinity, delay: 0.5 }}
+                                />
+                                <div className="absolute -top-5 left-1/2 -translate-x-1/2 text-[#ff00ff] text-[9px] font-bold opacity-0 group-hover:opacity-100 transition-opacity">
+                                  {motoristas}
+                                </div>
+                              </motion.div>
+                            </div>
+                            <div className="border-t border-[#1f1f2e] w-full pt-0.5">
+                              <p className="text-gray-500 text-[10px] text-center truncate">{v.name || v.username || `V${idx + 1}`}</p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="h-[200px] flex items-center justify-center">
+                    <div className="text-center">
+                      <Users className="w-8 h-8 text-gray-700 mx-auto mb-2" />
+                      <p className="text-gray-600 text-xs">Nenhum vendedor</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </GlowCard>
           </div>
         </motion.div>
       )}
 
-      {/* Usuários */}
-      {activeTab === "usuarios" && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="space-y-6"
-        >
-          <div className="bg-[#12121a] border border-[#1f1f2e] rounded-2xl p-6">
-            <h2 className="text-white font-bold text-xl mb-6">Hierarquia de Vendedores</h2>
-            <div className="space-y-4">
-              {vendedores.map((vendedor) => (
-                <div key={vendedor.id} className="border border-[#1f1f2e] rounded-xl overflow-hidden">
-                  <button
-                    onClick={() =>
-                      setExpandedVendor(expandedVendor === vendedor.id ? null : vendedor.id)
-                    }
-                    className="w-full flex items-center justify-between p-4 hover:bg-[#1f1f2e]/50 transition-colors"
-                  >
-                    <div className="flex items-center gap-4">
-                      <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[#00f0ff] to-[#8b5cf6] flex items-center justify-center">
-                        <span className="text-white font-bold">
-                          {renderAvatar(vendedor)}
-                        </span>
+      {/* ===================== HIERARQUIA ===================== */}
+      {activeTab === "hierarquia" && (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-white font-bold text-xl flex items-center gap-2">
+              <GitBranch className="w-5 h-5 text-[#00f0ff]" />
+              <NeonText>Hierarquia</NeonText>
+            </h2>
+            <motion.button
+              onClick={loadHierarchy}
+              whileTap={{ scale: 0.95, rotate: 180 }}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-[#00f0ff]/10 text-[#00f0ff] rounded-lg hover:bg-[#00f0ff]/15 transition-colors text-xs font-medium border border-[#00f0ff]/20"
+            >
+              <RefreshCw className="w-3.5 h-3.5" /> <span>Atualizar</span>
+            </motion.button>
+          </div>
+
+          {/* Admin Node */}
+          <GlowCard glowColor="#00f0ff">
+            <div className="p-4">
+              <div className="flex items-center gap-3 mb-4">
+                <NeonAvatar name="AD" size="lg" />
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-white font-bold text-base">Administrador</h3>
+                  <p className="text-[#00f0ff] text-xs">@admin - Nivel Superior</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  {[
+                    { val: adminStats.totalVendedores || 0, label: "Vend", color: "#00f0ff" },
+                    { val: adminStats.totalClientes || 0, label: "Cli", color: "#8b5cf6" },
+                    { val: adminStats.totalMotoristas || 0, label: "Mot", color: "#ff00ff" },
+                  ].map((s) => (
+                    <div key={s.label} className="text-center">
+                      <NeonText color={s.color} className="text-xl font-black block">{s.val}</NeonText>
+                      <p className="text-gray-500 text-[11px]">{s.label}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Admin Codes - compact */}
+              {adminCodes.length > 0 && (
+                <div className="mb-4">
+                  <h4 className="text-gray-500 text-xs font-semibold mb-2 flex items-center gap-1.5">
+                    <Ticket className="w-3 h-3" /> Codigos do Admin
+                  </h4>
+                  <div className="grid grid-cols-1 gap-1.5">
+                    {adminCodes.map((code: any, i: number) => (
+                      <div
+                        key={`${code.code}-${i}`}
+                        className={`flex items-center justify-between p-2.5 rounded-lg border ${
+                          code.used ? "bg-[#00ff41]/5 border-[#00ff41]/15" : "bg-[#ff9f00]/5 border-[#ff9f00]/20"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          {code.used ? (
+                            <CheckCircle2 className="w-3 h-3 text-[#00ff41] shrink-0" />
+                          ) : (
+                            <Clock className="w-3 h-3 text-[#ff9f00] shrink-0" />
+                          )}
+                          <div className="min-w-0">
+                            <span className="text-white font-mono text-xs truncate block">{code.code}</span>
+                            {code.used && code.usedBy && (
+                              <p className="text-[#00ff41] text-[9px] truncate">@{code.usedBy}</p>
+                            )}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => copyToClipboard(code.code)}
+                          className="p-1 rounded-md hover:bg-[#00f0ff]/10 text-[#00f0ff] transition-colors shrink-0"
+                        >
+                          {copied === code.code ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                        </button>
                       </div>
-                      <div className="text-left">
-                        <h3 className="text-white font-semibold">{vendedor.nome || vendedor.name || "Vendedor"}</h3>
-                        <p className="text-gray-400 text-sm">
-                          {vendedor.clientes || 0} clientes • {vendedor.motoristas || 0} motoristas
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Vendedores Tree */}
+              <div className="space-y-3">
+                {vendedores.length === 0 ? (
+                  <div className="text-center py-6 text-gray-600">
+                    <motion.div animate={{ opacity: [0.2, 0.5, 0.2] }} transition={{ duration: 3, repeat: Infinity }}>
+                      <Users className="w-10 h-10 mx-auto mb-2" />
+                    </motion.div>
+                    <p className="text-xs">Nenhum vendedor cadastrado</p>
+                    <p className="text-[10px] mt-1">Gere um codigo na aba "Convites"</p>
+                  </div>
+                ) : (
+                  vendedores.map((vendedor: any) => (
+                    <GlowCard key={vendedor.username} glowColor="#8b5cf6">
+                      <div>
+                        <div className="flex items-center justify-between p-3.5">
+                          <button
+                            onClick={() => setExpandedVendor(expandedVendor === vendedor.username ? null : vendedor.username)}
+                            className="flex items-center gap-3 flex-1 text-left min-w-0"
+                          >
+                            <NeonAvatar photo={vendedor.photo} name={vendedor.name || vendedor.username} size="md" />
+                            <div className="min-w-0">
+                              <h3 className="text-white font-semibold text-sm truncate">{vendedor.name || "Vendedor"}</h3>
+                              <p className="text-gray-500 text-xs truncate">
+                                @{vendedor.username} · {vendedor.stats?.totalClientes || 0}C · {vendedor.stats?.totalMotoristas || 0}M
+                              </p>
+                              {vendedor.inviteCodeUsed && (
+                                <p className="text-[#00f0ff]/60 text-[9px] font-mono truncate">{vendedor.inviteCodeUsed}</p>
+                              )}
+                            </div>
+                          </button>
+                          <div className="flex items-center gap-1.5 ml-2 shrink-0">
+                            <motion.button
+                              whileTap={{ scale: 0.85 }}
+                              onClick={(e) => { e.stopPropagation(); handleEnterVendorPanel(vendedor); }}
+                              className="p-2 bg-[#00f0ff]/10 text-[#00f0ff] rounded-lg hover:bg-[#00f0ff]/20 transition-colors border border-[#00f0ff]/20"
+                              title="Entrar no painel"
+                            >
+                              <ExternalLink className="w-3.5 h-3.5" />
+                            </motion.button>
+                            <motion.button
+                              whileTap={{ scale: 0.85 }}
+                              onClick={(e) => { e.stopPropagation(); setDeleteConfirm(vendedor); }}
+                              className="p-2 bg-[#ff006e]/10 text-[#ff006e] rounded-lg hover:bg-[#ff006e]/20 transition-colors border border-[#ff006e]/20"
+                              title="Excluir"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </motion.button>
+                            <button
+                              onClick={() => setExpandedVendor(expandedVendor === vendedor.username ? null : vendedor.username)}
+                              className="p-1.5 text-gray-500 hover:text-[#00f0ff] transition-colors"
+                            >
+                              {expandedVendor === vendedor.username ? (
+                                <ChevronUp className="w-4 h-4 text-[#00f0ff]" />
+                              ) : (
+                                <ChevronDown className="w-4 h-4" />
+                              )}
+                            </button>
+                          </div>
+                        </div>
+
+                        <AnimatePresence>
+                          {expandedVendor === vendedor.username && (
+                            <motion.div
+                              initial={{ height: 0, opacity: 0 }}
+                              animate={{ height: "auto", opacity: 1 }}
+                              exit={{ height: 0, opacity: 0 }}
+                              className="overflow-hidden"
+                            >
+                              <div className="bg-[#0a0a12]/60 p-4 space-y-4 border-t border-[#1f1f2e]/40">
+                                {/* Códigos do Vendedor */}
+                                <div>
+                                  <h4 className="text-gray-500 text-xs font-semibold mb-2 flex items-center gap-1.5">
+                                    <Ticket className="w-3 h-3" /> Codigos de {vendedor.name}
+                                  </h4>
+                                  {vendedor.codesGenerated?.cliente?.length > 0 && (
+                                    <div className="mb-2">
+                                      <p className="text-[#00f0ff] text-[11px] font-semibold mb-1">Clientes</p>
+                                      <div className="space-y-1">
+                                        {vendedor.codesGenerated.cliente.map((c: any, i: number) => (
+                                          <div key={`c-${i}`} className={`flex items-center gap-2 p-2 rounded-lg text-xs ${c.used ? "bg-[#00ff41]/5 border border-[#00ff41]/10" : "bg-[#ff9f00]/5 border border-[#ff9f00]/10"}`}>
+                                            {c.used ? <CheckCircle2 className="w-3 h-3 text-[#00ff41] shrink-0" /> : <Clock className="w-3 h-3 text-[#ff9f00] shrink-0" />}
+                                            <span className="text-white font-mono truncate">{c.code}</span>
+                                            {c.used && c.usedBy && <span className="text-[#00ff41] text-[9px] shrink-0">@{c.usedBy}</span>}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                  {vendedor.codesGenerated?.motorista?.length > 0 && (
+                                    <div className="mb-2">
+                                      <p className="text-[#ff00ff] text-[11px] font-semibold mb-1">Motoristas</p>
+                                      <div className="space-y-1">
+                                        {vendedor.codesGenerated.motorista.map((c: any, i: number) => (
+                                          <div key={`m-${i}`} className={`flex items-center gap-2 p-2 rounded-lg text-xs ${c.used ? "bg-[#00ff41]/5 border border-[#00ff41]/10" : "bg-[#ff9f00]/5 border border-[#ff9f00]/10"}`}>
+                                            {c.used ? <CheckCircle2 className="w-3 h-3 text-[#00ff41] shrink-0" /> : <Clock className="w-3 h-3 text-[#ff9f00] shrink-0" />}
+                                            <span className="text-white font-mono truncate">{c.code}</span>
+                                            {c.used && c.usedBy && <span className="text-[#00ff41] text-[9px] shrink-0">@{c.usedBy}</span>}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                  {!vendedor.codesGenerated?.cliente?.length && !vendedor.codesGenerated?.motorista?.length && (
+                                    <p className="text-gray-600 text-[10px] italic">Nenhum codigo gerado</p>
+                                  )}
+                                </div>
+
+                                {/* Clientes */}
+                                <div>
+                                  <h4 className="text-[#00f0ff] text-xs font-semibold mb-1.5 flex items-center gap-1.5">
+                                    <Users className="w-3 h-3" /> Clientes ({vendedor.clientes?.length || 0})
+                                  </h4>
+                                  {vendedor.clientes?.length > 0 ? (
+                                    <div className="space-y-1">
+                                      {vendedor.clientes.map((c: any) => (
+                                        <div key={c.username} className="flex items-center gap-2 p-2 bg-[#0c0c14]/80 rounded-lg border border-[#1f1f2e]/40">
+                                          <NeonAvatar photo={c.photo} name={c.name || c.username} size="sm" />
+                                          <div className="flex-1 min-w-0">
+                                            <span className="text-white text-xs font-medium truncate block">{c.name || c.username}</span>
+                                            <span className="text-gray-600 text-[9px]">@{c.username}</span>
+                                          </div>
+                                          <span className="text-gray-600 text-[10px] shrink-0">{formatDate(c.registeredAt)}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <p className="text-gray-600 text-[10px] italic">Nenhum cliente</p>
+                                  )}
+                                </div>
+
+                                {/* Motoristas */}
+                                <div>
+                                  <h4 className="text-[#ff00ff] text-xs font-semibold mb-1.5 flex items-center gap-1.5">
+                                    <Users className="w-3 h-3" /> Motoristas ({vendedor.motoristas?.length || 0})
+                                  </h4>
+                                  {vendedor.motoristas?.length > 0 ? (
+                                    <div className="space-y-1">
+                                      {vendedor.motoristas.map((m: any) => (
+                                        <div key={m.username} className="flex items-center gap-2 p-2 bg-[#0c0c14]/80 rounded-lg border border-[#1f1f2e]/40">
+                                          <NeonAvatar photo={m.photo} name={m.name || m.username} size="sm" />
+                                          <div className="flex-1 min-w-0">
+                                            <span className="text-white text-xs font-medium truncate block">{m.name || m.username}</span>
+                                            <span className="text-gray-600 text-[9px]">@{m.username}</span>
+                                          </div>
+                                          <span className="text-gray-600 text-[10px] shrink-0">{formatDate(m.registeredAt)}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <p className="text-gray-600 text-[10px] italic">Nenhum motorista</p>
+                                  )}
+                                </div>
+
+                                {/* Actions */}
+                                <div className="flex items-center gap-2">
+                                  <motion.button
+                                    whileTap={{ scale: 0.95 }}
+                                    onClick={() => handleEnterVendorPanel(vendedor)}
+                                    className="flex-1 py-2 bg-[#00f0ff]/10 text-[#00f0ff] rounded-lg hover:bg-[#00f0ff]/20 transition-colors font-medium text-xs border border-[#00f0ff]/20 flex items-center justify-center gap-1.5"
+                                  >
+                                    <ExternalLink className="w-3 h-3" /> Entrar como Vendedor
+                                  </motion.button>
+                                  <motion.button
+                                    whileTap={{ scale: 0.95 }}
+                                    onClick={() => setDeleteConfirm(vendedor)}
+                                    className="py-2 px-3 bg-[#ff006e]/10 text-[#ff006e] rounded-lg hover:bg-[#ff006e]/20 transition-colors font-medium text-xs border border-[#ff006e]/20 flex items-center gap-1.5"
+                                  >
+                                    <Trash2 className="w-3 h-3" /> Deletar
+                                  </motion.button>
+                                </div>
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </div>
+                    </GlowCard>
+                  ))
+                )}
+              </div>
+            </div>
+          </GlowCard>
+        </motion.div>
+      )}
+
+      {/* ===================== CONVITES ===================== */}
+      {activeTab === "convite" && (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4">
+          <GlowCard>
+            <div className="p-5">
+              <h2 className="text-white font-bold text-lg mb-1">
+                <NeonText>Gerar Codigo de Convite</NeonText>
+              </h2>
+              <p className="text-gray-500 text-xs mb-4">
+                Gere codigos unicos para vendedores. Cada codigo so pode ser usado uma vez.
+              </p>
+
+              {/* Steps */}
+              <div className="bg-[#00f0ff]/5 border border-[#00f0ff]/15 rounded-xl p-3 mb-4">
+                <p className="text-[#00f0ff] text-xs font-medium mb-2">Como funciona:</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    "Admin gera codigo",
+                    "Vendedor usa codigo",
+                    "Codigo fica invalido",
+                    "Vendedor vinculado",
+                  ].map((step, i) => (
+                    <div key={i} className="flex items-start gap-1.5">
+                      <motion.span
+                        className="w-4 h-4 shrink-0 rounded-full bg-[#00f0ff]/15 text-[#00f0ff] text-[9px] flex items-center justify-center font-bold mt-0.5"
+                        animate={{ boxShadow: ["0 0 4px rgba(0,240,255,0)", "0 0 8px rgba(0,240,255,0.3)", "0 0 4px rgba(0,240,255,0)"] }}
+                        transition={{ duration: 2, repeat: Infinity, delay: i * 0.3 }}
+                      >
+                        {i + 1}
+                      </motion.span>
+                      <span className="text-gray-400 text-[11px] leading-tight">{step}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <motion.button
+                whileHover={{ scale: 1.02, boxShadow: "0 0 30px rgba(0,240,255,0.3)" }}
+                whileTap={{ scale: 0.97 }}
+                onClick={handleGenerateCode}
+                disabled={loading}
+                className="w-full py-3.5 font-bold text-white text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-50 transition-all"
+                style={{ background: "linear-gradient(135deg, #00f0ff 0%, #8b5cf6 100%)" }}
+              >
+                {loading ? (
+                  <motion.div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full" animate={{ rotate: 360 }} transition={{ duration: 0.8, repeat: Infinity, ease: "linear" }} />
+                ) : copied ? (
+                  <><Check className="w-4 h-4" /> Codigo Copiado!</>
+                ) : (
+                  <><Zap className="w-4 h-4" /> Gerar e Copiar Codigo</>
+                )}
+              </motion.button>
+            </div>
+          </GlowCard>
+
+          {/* Code list */}
+          <GlowCard glowColor="#8b5cf6">
+            <div className="p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-white font-bold text-sm">Codigos ({adminCodes.length})</h3>
+                <div className="flex items-center gap-2 text-[11px]">
+                  <span className="text-[#00ff41] flex items-center gap-0.5">
+                    <CheckCircle2 className="w-2.5 h-2.5" /> {adminCodes.filter((c: any) => c.used).length}
+                  </span>
+                  <span className="text-[#ff9f00] flex items-center gap-0.5">
+                    <Clock className="w-2.5 h-2.5" /> {adminCodes.filter((c: any) => !c.used).length}
+                  </span>
+                </div>
+              </div>
+
+              {adminCodes.length === 0 ? (
+                <div className="text-center py-6">
+                  <motion.div animate={{ opacity: [0.2, 0.5, 0.2] }} transition={{ duration: 3, repeat: Infinity }}>
+                    <Ticket className="w-8 h-8 text-gray-700 mx-auto mb-2" />
+                  </motion.div>
+                  <p className="text-gray-600 text-xs">Nenhum codigo gerado</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {[...adminCodes].reverse().map((codeObj: any, i: number) => (
+                    <motion.div
+                      key={`${codeObj.code}-${i}`}
+                      initial={{ opacity: 0, x: -10 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: i * 0.05 }}
+                      className={`p-3.5 rounded-xl border transition-all ${
+                        codeObj.used
+                          ? "bg-[#00ff41]/5 border-[#00ff41]/15"
+                          : "bg-[#ff9f00]/5 border-[#ff9f00]/20 hover:border-[#00f0ff]/30"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className={`p-1.5 rounded-lg shrink-0 ${codeObj.used ? "bg-[#00ff41]/15" : "bg-[#ff9f00]/15"}`}>
+                            {codeObj.used ? <CheckCircle2 className="w-3.5 h-3.5 text-[#00ff41]" /> : <Clock className="w-3.5 h-3.5 text-[#ff9f00]" />}
+                          </div>
+                          <div className="min-w-0">
+                            <span className="text-white font-mono text-sm block truncate">{codeObj.code}</span>
+                            <p className="text-gray-600 text-[11px]">{formatDate(codeObj.generatedAt)}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          {codeObj.used ? (
+                            <div className="text-right">
+                              <p className="text-[#00ff41] text-xs font-medium flex items-center gap-1">
+                                <UserPlus className="w-3 h-3" /> @{codeObj.usedBy}
+                              </p>
+                            </div>
+                          ) : (
+                            <>
+                              <span className="px-2 py-0.5 bg-[#ff9f00]/15 text-[#ff9f00] rounded-full text-[11px] font-medium">
+                                Disponivel
+                              </span>
+                              <button
+                                onClick={() => copyToClipboard(codeObj.code)}
+                                className="p-1.5 rounded-lg hover:bg-[#00f0ff]/10 text-[#00f0ff] transition-colors"
+                              >
+                                {copied === codeObj.code ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </GlowCard>
+        </motion.div>
+      )}
+
+      {/* ===================== TAXA ===================== */}
+      {activeTab === "taxa" && (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-3">
+          <GlowCard>
+            <div className="p-4">
+              <h2 className="text-white font-bold text-lg mb-1">
+                <NeonText>Configuracao de Taxas</NeonText>
+              </h2>
+              <p className="text-gray-500 text-xs mb-4">Defina a % de comissao por vendedor</p>
+              <div className="space-y-3">
+                {vendedores.length === 0 ? (
+                  <p className="text-gray-600 text-center py-6 text-xs">Nenhum vendedor cadastrado</p>
+                ) : (
+                  vendedores.map((vendedor: any) => {
+                    const rate = vendorRates[vendedor.username] ?? 15;
+                    const isSaving = savingRate === vendedor.username;
+                    return (
+                      <motion.div key={vendedor.username}
+                        className="p-4 bg-[#0a0a12]/60 rounded-xl border border-[#1f1f2e]/40 space-y-3"
+                        whileHover={{ borderColor: "rgba(0,240,255,0.15)" }}
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <NeonAvatar photo={vendedor.photo} name={vendedor.name} size="sm" />
+                          <div className="min-w-0 flex-1">
+                            <h3 className="text-white font-semibold text-sm truncate">{vendedor.name || "Vendedor"}</h3>
+                            <p className="text-gray-500 text-[11px]">@{vendedor.username}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <motion.button whileTap={{ scale: 0.85 }}
+                            onClick={() => setVendorRates(prev => ({ ...prev, [vendedor.username]: Math.max(0, (prev[vendedor.username] ?? 15) - 1) }))}
+                            className="w-9 h-9 rounded-lg bg-[#1f1f2e] text-gray-400 flex items-center justify-center hover:text-[#ff006e] hover:bg-[#ff006e]/10 transition-colors border border-[#1f1f2e]"
+                          >
+                            <Minus className="w-3.5 h-3.5" />
+                          </motion.button>
+                          <div className="flex-1 relative">
+                            <input
+                              type="number" min="0" max="100" step="1"
+                              value={rate}
+                              onChange={(e) => {
+                                const v = Math.min(100, Math.max(0, Number(e.target.value)));
+                                setVendorRates(prev => ({ ...prev, [vendedor.username]: v }));
+                              }}
+                              className="w-full text-center py-2 bg-[#0c0c14] border border-[#1f1f2e] rounded-xl text-white text-xl font-black focus:outline-none focus:border-[#00f0ff]/50 transition-all"
+                            />
+                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-600 font-bold text-sm">%</span>
+                          </div>
+                          <motion.button whileTap={{ scale: 0.85 }}
+                            onClick={() => setVendorRates(prev => ({ ...prev, [vendedor.username]: Math.min(100, (prev[vendedor.username] ?? 15) + 1) }))}
+                            className="w-9 h-9 rounded-lg bg-[#1f1f2e] text-gray-400 flex items-center justify-center hover:text-[#00ff41] hover:bg-[#00ff41]/10 transition-colors border border-[#1f1f2e]"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                          </motion.button>
+                          <motion.button whileTap={{ scale: 0.9 }}
+                            onClick={() => handleSaveRate(vendedor.username)}
+                            disabled={isSaving}
+                            className="px-4 py-2 rounded-xl font-bold text-xs text-black transition-all disabled:opacity-50 flex items-center gap-1.5"
+                            style={{ background: "linear-gradient(135deg, #00f0ff, #8b5cf6)" }}
+                          >
+                            {isSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                            Salvar
+                          </motion.button>
+                        </div>
+                        <div className="flex items-center gap-2 text-[10px]">
+                          <div className="flex-1 h-1.5 bg-[#1f1f2e] rounded-full overflow-hidden">
+                            <motion.div
+                              className="h-full rounded-full"
+                              style={{ background: rate > 30 ? "linear-gradient(90deg, #ff006e, #ff9f00)" : "linear-gradient(90deg, #00ff41, #00f0ff)", width: `${rate}%` }}
+                              initial={false}
+                              animate={{ width: `${rate}%` }}
+                              transition={{ duration: 0.3 }}
+                            />
+                          </div>
+                          <span className="text-gray-500 font-medium shrink-0">{rate}% Admin · {100 - rate}% Vendedor</span>
+                        </div>
+                      </motion.div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          </GlowCard>
+        </motion.div>
+      )}
+
+      {/* ===================== SEGURANCA ===================== */}
+      {activeTab === "seguranca" && (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4">
+          <GlowCard>
+            <div className="p-4">
+              <h2 className="text-white font-bold text-lg mb-1">
+                <NeonText color="#ff006e">Seguranca</NeonText>
+              </h2>
+              <p className="text-gray-500 text-xs mb-3">Gerencie senhas e permissoes.</p>
+              <div className="space-y-2">
+                {vendedores.map((vendedor: any) => (
+                  <div key={vendedor.username} className="p-3.5 bg-[#0a0a12]/60 rounded-xl border border-[#1f1f2e]/40 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <NeonAvatar photo={vendedor.photo} name={vendedor.name} size="sm" />
+                      <div className="min-w-0">
+                        <h3 className="text-white font-semibold text-sm truncate">{vendedor.name || "Vendedor"}</h3>
+                        <p className="text-gray-500 text-xs">
+                          {(vendedor.stats?.totalClientes || 0) + (vendedor.stats?.totalMotoristas || 0)} vinculados
                         </p>
                       </div>
                     </div>
-                    {expandedVendor === vendedor.id ? (
-                      <ChevronUp className="w-5 h-5 text-[#00f0ff]" />
-                    ) : (
-                      <ChevronDown className="w-5 h-5 text-gray-400" />
-                    )}
-                  </button>
-                  {expandedVendor === vendedor.id && (
-                    <motion.div
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: "auto", opacity: 1 }}
-                      className="bg-[#1f1f2e]/30 p-4 space-y-3"
+                    <motion.button
+                      whileTap={{ scale: 0.95 }}
+                      className="px-2.5 py-1.5 bg-[#ff006e]/10 text-[#ff006e] rounded-lg hover:bg-[#ff006e]/20 transition-colors font-medium text-xs border border-[#ff006e]/20 shrink-0"
                     >
-                      <div className="flex justify-between items-center">
-                        <span className="text-gray-400">Clientes Cadastrados:</span>
-                        <span className="text-[#00f0ff] font-semibold">{vendedor.clientes}</span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-gray-400">Motoristas Cadastrados:</span>
-                        <span className="text-[#00f0ff] font-semibold">{vendedor.motoristas}</span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-gray-400">Vendas Totais:</span>
-                        <span className="text-[#00ff41] font-semibold">
-                          R$ {(vendedor.vendas || 0).toLocaleString()}
-                        </span>
-                      </div>
-                    </motion.div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        </motion.div>
-      )}
-
-      {/* Código de Convite */}
-      {activeTab === "convite" && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="space-y-6"
-        >
-          <div className="bg-[#12121a] border border-[#1f1f2e] rounded-2xl p-8">
-            <h2 className="text-white font-bold text-xl mb-6">Gerar Código de Convite</h2>
-            <p className="text-gray-400 mb-6">
-              Gere códigos únicos para permitir que novos vendedores se cadastrem na plataforma.
-            </p>
-            <motion.button
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
-              onClick={handleGenerateCode}
-              className="w-full py-4 bg-gradient-to-r from-[#00f0ff] to-[#8b5cf6] text-white font-bold rounded-xl shadow-[0_0_30px_rgba(0,240,255,0.3)] hover:shadow-[0_0_40px_rgba(0,240,255,0.5)] transition-all flex items-center justify-center gap-2"
-            >
-              {copied ? (
-                <>
-                  <Check className="w-5 h-5" />
-                  Código Copiado!
-                </>
-              ) : (
-                <>
-                  <Copy className="w-5 h-5" />
-                  Gerar e Copiar Código
-                </>
-              )}
-            </motion.button>
-          </div>
-
-          <div className="bg-[#12121a] border border-[#1f1f2e] rounded-2xl p-6">
-            <h3 className="text-white font-bold text-lg mb-4">Códigos Recentes</h3>
-            <div className="space-y-3">
-              {generatedCodes.map((codeObj, i) => (
-                <div
-                  key={`${codeObj.code}-${i}`}
-                  className="flex items-center justify-between p-4 bg-[#1f1f2e] rounded-xl"
-                >
-                  <span className="text-white font-mono text-lg">{codeObj.code}</span>
-                  <div className="flex items-center gap-3">
-                    <span className={`text-sm ${codeObj.used ? "text-[#ff006e]" : "text-[#00ff41]"}`}>
-                      {codeObj.used ? "Usado" : "Ativo"}
-                    </span>
-                    <button
-                      onClick={() => copyToClipboard(codeObj.code)}
-                      className="p-2 rounded-lg hover:bg-[#00f0ff]/10 text-[#00f0ff] transition-colors"
-                    >
-                      <Copy className="w-4 h-4" />
-                    </button>
+                      Trocar Senha
+                    </motion.button>
                   </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </motion.div>
-      )}
-
-      {/* Taxa Admin */}
-      {activeTab === "taxa" && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="space-y-6"
-        >
-          <div className="bg-[#12121a] border border-[#1f1f2e] rounded-2xl p-6">
-            <h2 className="text-white font-bold text-xl mb-6">Configuração de Taxas</h2>
-            <div className="space-y-4">
-              {vendedores.map((vendedor) => (
-                <div
-                  key={vendedor.id}
-                  className="flex items-center justify-between p-4 bg-[#1f1f2e] rounded-xl"
-                >
-                  <div>
-                    <h3 className="text-white font-semibold">{vendedor.nome || vendedor.name || "Vendedor"}</h3>
-                    <p className="text-gray-400 text-sm">
-                      Faturamento: R$ {(vendedor.vendas || 0).toLocaleString()}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-4">
-                    <div className="text-right">
-                      <p className="text-[#00f0ff] font-bold text-lg">{vendedor.taxa || 0}%</p>
-                      <p className="text-gray-400 text-xs">Taxa Admin</p>
-                    </div>
-                    <input
-                      type="number"
-                      value={vendedor.taxa || 0}
-                      readOnly
-                      className="w-20 px-3 py-2 bg-[#12121a] border border-[#2a2a3e] rounded-lg text-white text-center focus:outline-none focus:border-[#00f0ff]"
-                      min="0"
-                      max="100"
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </motion.div>
-      )}
-
-      {/* Segurança */}
-      {activeTab === "seguranca" && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="space-y-6"
-        >
-          <div className="bg-[#12121a] border border-[#1f1f2e] rounded-2xl p-6">
-            <h2 className="text-white font-bold text-xl mb-6">Gerenciamento de Segurança</h2>
-            <p className="text-gray-400 mb-6">
-              Gerencie senhas e permissões de todos os usuários da plataforma.
-            </p>
-            <div className="space-y-4">
-              {vendedores.map((vendedor) => (
-                <div
-                  key={vendedor.id}
-                  className="p-4 bg-[#1f1f2e] rounded-xl flex items-center justify-between"
-                >
-                  <div>
-                    <h3 className="text-white font-semibold">{vendedor.nome || vendedor.name || "Vendedor"}</h3>
-                    <p className="text-gray-400 text-sm">
-                      {(vendedor.clientes || 0) + (vendedor.motoristas || 0)} usuários vinculados
-                    </p>
-                  </div>
-                  <button className="px-4 py-2 bg-[#ff006e]/20 text-[#ff006e] rounded-lg hover:bg-[#ff006e]/30 transition-colors font-medium">
-                    Trocar Senha
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        </motion.div>
-      )}
-
-      {/* API */}
-      {activeTab === "api" && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="space-y-6"
-        >
-          <div className="bg-[#12121a] border border-[#1f1f2e] rounded-2xl p-8">
-            <h2 className="text-white font-bold text-xl mb-6">Configuração API PIXWAVE</h2>
-            <p className="text-gray-400 mb-6">
-              Configure a API KEY da PIXWAVE para recebimento de pagamentos em DEPIX.
-            </p>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">
-                  API KEY PIXWAVE
-                </label>
-                <input
-                  type="password"
-                  placeholder="Digite sua API KEY"
-                  className="w-full px-4 py-3 bg-[#1f1f2e] border border-[#2a2a3e] rounded-xl text-white focus:outline-none focus:border-[#00f0ff] focus:ring-2 focus:ring-[#00f0ff]/20 transition-all"
-                />
+                ))}
               </div>
-              <motion.button
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-                className="w-full py-4 bg-gradient-to-r from-[#00f0ff] to-[#8b5cf6] text-white font-bold rounded-xl shadow-[0_0_30px_rgba(0,240,255,0.3)]"
-              >
-                Salvar Configuração
-              </motion.button>
             </div>
-          </div>
-        </motion.div>
-      )}
+          </GlowCard>
 
-      {/* Faturamento */}
-      {activeTab === "faturamento" && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="space-y-6"
-        >
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
-            <StatCard
-              title="Vendas Hoje"
-              value="R$ 24,500"
-              icon={<DollarSign className="w-6 h-6" />}
-              color="cyan"
-            />
-            <StatCard
-              title="A Repassar Hoje"
-              value="R$ 3,200"
-              icon={<TrendingUp className="w-6 h-6" />}
-              color="purple"
-            />
-            <StatCard
-              title="Total Mês"
-              value="R$ 542K"
-              icon={<ShoppingBag className="w-6 h-6" />}
-              color="green"
-            />
-          </div>
-
-          <div className="bg-[#12121a] border border-[#1f1f2e] rounded-2xl p-6">
-            <h2 className="text-white font-bold text-xl mb-6">Detalhamento por Vendedor</h2>
-            <div className="space-y-4">
-              {vendedores.length > 0 ? (
-                vendedores.map((vendedor) => (
-                  <div
-                    key={vendedor.username || vendedor.id}
-                    className="p-5 bg-[#1f1f2e] rounded-xl space-y-3"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <div
-                          className="w-12 h-12 rounded-full flex items-center justify-center font-bold text-white border-2 border-gray-500"
-                          style={{
-                            background: "linear-gradient(135deg, #00f0ff 0%, #8b5cf6 100%)",
-                          }}
-                        >
-                          {renderAvatar(vendedor)}
-                        </div>
-                        <div>
-                          <h3 className="text-white font-semibold text-lg">{vendedor.name || "Vendedor"}</h3>
-                          <p className="text-gray-400 text-sm">@{vendedor.username || "unknown"}</p>
-                        </div>
-                      </div>
-                      <span className="px-3 py-1 bg-[#00ff41]/20 text-[#00ff41] rounded-full text-sm font-medium">
-                        Ativo
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-3 gap-4">
-                      <div>
-                        <p className="text-gray-400 text-sm">Valor Vendido</p>
-                        <p className="text-white font-bold">R$ 0,00</p>
-                      </div>
-                      <div>
-                        <p className="text-gray-400 text-sm">Taxa Admin (15%)</p>
-                        <p className="text-[#ff00ff] font-bold">R$ 0,00</p>
-                      </div>
-                      <div>
-                        <p className="text-gray-400 text-sm">A Repassar</p>
-                        <p className="text-[#00f0ff] font-bold">R$ 0,00</p>
-                      </div>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <p className="text-gray-500 text-center py-8">
-                  Nenhum vendedor cadastrado
-                </p>
+          {/* Repair */}
+          <GlowCard glowColor="#8b5cf6">
+            <div className="p-4">
+              <h2 className="text-white font-bold text-lg mb-1">
+                <NeonText color="#8b5cf6">Reparar Vinculos</NeonText>
+              </h2>
+              <p className="text-gray-500 text-xs mb-3">Reconstrua conexoes perdidas.</p>
+              <motion.button
+                whileHover={{ scale: 1.02, boxShadow: "0 0 30px rgba(139,92,246,0.3)" }}
+                whileTap={{ scale: 0.97 }}
+                onClick={async () => {
+                  try {
+                    setRepairMessage("Reparando...");
+                    const response = await api.repairLinks();
+                    if (response.success) {
+                      setRepairMessage("OK " + response.message);
+                      loadHierarchy();
+                    }
+                  } catch (err: any) {
+                    setRepairMessage("Erro: " + err.message);
+                  }
+                  setTimeout(() => setRepairMessage(""), 5000);
+                }}
+                className="w-full py-3.5 font-bold text-white text-sm rounded-xl flex items-center justify-center gap-2 transition-all"
+                style={{ background: "linear-gradient(135deg, #8b5cf6 0%, #00f0ff 100%)" }}
+              >
+                <RefreshCw className="w-4 h-4" /> Reparar Vinculos
+              </motion.button>
+              {repairMessage && (
+                <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className={`mt-2 text-xs text-center ${repairMessage.includes("OK") ? "text-[#00ff41]" : repairMessage.includes("Erro") ? "text-[#ff006e]" : "text-[#00f0ff]"}`}>
+                  {repairMessage}
+                </motion.p>
               )}
             </div>
-          </div>
+          </GlowCard>
         </motion.div>
       )}
 
-      {/* Sair */}
-      {activeTab === "sair" && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="space-y-6"
-        >
-          <div className="bg-[#12121a] border border-[#1f1f2e] rounded-2xl p-6">
-            <h2 className="text-white font-bold text-xl mb-6">Sair da Plataforma</h2>
-            <p className="text-gray-400 mb-6">
-              Você está prestes a sair da plataforma. Deseja continuar?
-            </p>
-            <motion.button
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
-              onClick={handleLogout}
-              className="w-full py-4 bg-gradient-to-r from-[#ff006e] to-[#ff006e] text-white font-bold rounded-xl shadow-[0_0_30px_rgba(255,0,110,0.3)] hover:shadow-[0_0_40px_rgba(255,0,110,0.5)] transition-all flex items-center justify-center gap-2"
-            >
-              <LogOut className="w-5 h-5" />
-              Sair
-            </motion.button>
+      {/* ===================== API / PIXWAVE ===================== */}
+      {activeTab === "api" && (
+        <PixwavePanel />
+      )}
+
+      {/* ===================== FATURAMENTO ===================== */}
+      {activeTab === "faturamento" && (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <StatCard title="Vendas Hoje" value={`R$ ${(metrics.todaySales || 0).toLocaleString()}`} icon={<DollarSign className="w-full h-full" />} color="cyan" />
+            <StatCard title="Taxa Admin" value={`R$ ${(metrics.adminTax || 0).toLocaleString()}`} icon={<TrendingUp className="w-full h-full" />} color="purple" />
+            <StatCard title="Total Vendas" value={`R$ ${(metrics.totalSales || 0).toLocaleString()}`} icon={<ShoppingBag className="w-full h-full" />} color="green" />
           </div>
+
+          <GlowCard>
+            <div className="p-4">
+              <h2 className="text-white font-bold text-lg mb-3">
+                <NeonText>Detalhamento por Vendedor</NeonText>
+              </h2>
+              <div className="space-y-3">
+                {vendedores.length > 0 ? (
+                  vendedores.map((vendedor: any) => (
+                    <div key={vendedor.username} className="p-4 bg-[#0a0a12]/60 rounded-xl border border-[#1f1f2e]/40 space-y-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <NeonAvatar photo={vendedor.photo} name={vendedor.name} size="md" />
+                          <div className="min-w-0">
+                            <h3 className="text-white font-semibold text-sm truncate">{vendedor.name || "Vendedor"}</h3>
+                            <p className="text-gray-500 text-xs">@{vendedor.username}</p>
+                          </div>
+                        </div>
+                        <motion.span
+                          className="px-2 py-0.5 bg-[#00ff41]/10 text-[#00ff41] rounded-full text-[11px] font-medium border border-[#00ff41]/20 shrink-0"
+                          animate={{ boxShadow: ["0 0 4px rgba(0,255,65,0)", "0 0 8px rgba(0,255,65,0.3)", "0 0 4px rgba(0,255,65,0)"] }}
+                          transition={{ duration: 2, repeat: Infinity }}
+                        >
+                          Ativo
+                        </motion.span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-3">
+                        {[
+                          { label: "Clientes", val: vendedor.stats?.totalClientes || 0, color: "#00f0ff" },
+                          { label: "Motoristas", val: vendedor.stats?.totalMotoristas || 0, color: "#ff00ff" },
+                          { label: "Codigos", val: (vendedor.codesGenerated?.cliente?.length || 0) + (vendedor.codesGenerated?.motorista?.length || 0), color: "#8b5cf6" },
+                        ].map((item) => (
+                          <div key={item.label} className="text-center bg-[#0c0c14]/60 rounded-lg p-2 border border-[#1f1f2e]/30">
+                            <p className="text-gray-500 text-[11px]">{item.label}</p>
+                            <NeonText color={item.color} className="text-base font-bold block">{item.val}</NeonText>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-gray-600 text-center py-6 text-xs">Nenhum vendedor cadastrado</p>
+                )}
+              </div>
+            </div>
+          </GlowCard>
         </motion.div>
       )}
+
+      {/* ===================== DELETE MODAL ===================== */}
+      <AnimatePresence>
+        {deleteConfirm && (
+          <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-[100] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="relative max-w-md w-full"
+            >
+              {/* Glow border */}
+              <motion.div
+                className="absolute inset-0 rounded-2xl p-[1px]"
+                style={{ background: "conic-gradient(from 0deg, #ff006e40, transparent, #ff006e20, transparent)" }}
+                animate={{ rotate: [0, 360] }}
+                transition={{ duration: 8, repeat: Infinity, ease: "linear" }}
+              />
+              <div className="relative bg-[#0c0c14] border border-[#ff006e]/20 rounded-2xl p-5 m-[1px] shadow-[0_0_40px_rgba(255,0,110,0.15)]">
+                <div className="flex items-center gap-3 mb-4">
+                  <motion.div
+                    className="p-2.5 bg-[#ff006e]/15 rounded-xl"
+                    animate={{ boxShadow: ["0 0 8px rgba(255,0,110,0.2)", "0 0 16px rgba(255,0,110,0.4)", "0 0 8px rgba(255,0,110,0.2)"] }}
+                    transition={{ duration: 2, repeat: Infinity }}
+                  >
+                    <AlertTriangle className="w-6 h-6 text-[#ff006e]" />
+                  </motion.div>
+                  <div>
+                    <h3 className="text-white font-bold text-lg">Excluir Vendedor</h3>
+                    <p className="text-gray-500 text-xs">Acao irreversivel</p>
+                  </div>
+                </div>
+
+                <div className="bg-[#ff006e]/5 border border-[#ff006e]/15 rounded-xl p-3 mb-4 space-y-2">
+                  <p className="text-white font-medium text-sm">
+                    <span className="text-[#00f0ff] font-bold">{deleteConfirm.name || deleteConfirm.username}</span> (@{deleteConfirm.username})
+                  </p>
+                  <p className="text-[#ff006e] text-xs font-semibold">Serao removidos:</p>
+                  <ul className="text-gray-300 text-xs space-y-1 ml-1">
+                    {[
+                      { dot: "#00f0ff", text: "Conta e todos os dados" },
+                      { dot: "#8b5cf6", text: `${deleteConfirm.stats?.totalClientes || 0} cliente(s)` },
+                      { dot: "#ff00ff", text: `${deleteConfirm.stats?.totalMotoristas || 0} motorista(s)` },
+                      { dot: "#ff9f00", text: "Codigos, produtos, pedidos e chats" },
+                    ].map((item, i) => (
+                      <li key={i} className="flex items-center gap-2">
+                        <motion.div
+                          className="w-1.5 h-1.5 rounded-full shrink-0"
+                          style={{ backgroundColor: item.dot }}
+                          animate={{ boxShadow: [`0 0 3px ${item.dot}40`, `0 0 6px ${item.dot}70`, `0 0 3px ${item.dot}40`] }}
+                          transition={{ duration: 2, repeat: Infinity, delay: i * 0.2 }}
+                        />
+                        {item.text}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <motion.button
+                    whileTap={{ scale: 0.97 }}
+                    onClick={() => setDeleteConfirm(null)}
+                    disabled={deleting}
+                    className="flex-1 py-2.5 bg-[#1f1f2e] text-gray-300 font-semibold rounded-xl hover:bg-[#2a2a3e] transition-colors disabled:opacity-50 text-sm"
+                  >
+                    Cancelar
+                  </motion.button>
+                  <motion.button
+                    whileHover={{ boxShadow: "0 0 25px rgba(255,0,110,0.4)" }}
+                    whileTap={{ scale: 0.97 }}
+                    onClick={() => handleDeleteVendor(deleteConfirm.username)}
+                    disabled={deleting}
+                    className="flex-1 py-2.5 font-bold text-white rounded-xl flex items-center justify-center gap-1.5 disabled:opacity-50 text-sm transition-all"
+                    style={{ background: "linear-gradient(135deg, #ff006e 0%, #ff0040 100%)" }}
+                  >
+                    {deleting ? (
+                      <motion.div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full" animate={{ rotate: 360 }} transition={{ duration: 0.8, repeat: Infinity, ease: "linear" }} />
+                    ) : (
+                      <><Trash2 className="w-3.5 h-3.5" /> Excluir Tudo</>
+                    )}
+                  </motion.button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </SidebarLayout>
   );
 }

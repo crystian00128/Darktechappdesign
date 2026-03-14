@@ -71,6 +71,9 @@ export async function registerUser(userData: {
   name: string;
   role: 'admin' | 'vendedor' | 'cliente' | 'motorista';
   inviteCode?: string;
+  photo?: string;
+  faceData?: string;
+  whatsapp?: string;
 }) {
   return fetchAPI('/register', {
     method: 'POST',
@@ -78,7 +81,24 @@ export async function registerUser(userData: {
   });
 }
 
+// ==================== FACE RECOGNITION ====================
+export async function getUserFace(username: string) {
+  return fetchAPI(`/users/${username}/face`);
+}
+
+export async function loginFaceVerify(username: string) {
+  return fetchAPI('/login/face-verify', {
+    method: 'POST',
+    body: JSON.stringify({ username }),
+  });
+}
+
 // ==================== USUÁRIOS ====================
+// Verificar disponibilidade de username
+export async function checkUsername(username: string) {
+  return fetchAPI(`/users/check/${username}`);
+}
+
 export async function getUsers(role: 'admin' | 'vendedor' | 'cliente' | 'motorista') {
   return fetchAPI(`/users/${role}`);
 }
@@ -91,4 +111,222 @@ export async function getUsersCreatedBy(username: string) {
 // Buscar quem criou um usuário específico
 export async function getUserCreator(username: string) {
   return fetchAPI(`/users/${username}/creator`);
+}
+
+// Reparar vínculos entre usuários
+export async function repairLinks() {
+  return fetchAPI('/repair-links', { method: 'POST' });
+}
+
+// Vincular um usuário existente a um vendedor via código de convite
+export async function linkUser(username: string, inviteCode: string) {
+  return fetchAPI('/link-user', {
+    method: 'POST',
+    body: JSON.stringify({ username, inviteCode }),
+  });
+}
+
+// ==================== CHAT ====================
+export async function sendMessage(
+  from: string, to: string, text: string, type = "text",
+  extra?: { mediaId?: string; audioDuration?: number }
+) {
+  return fetchAPI('/chat/send', {
+    method: 'POST',
+    body: JSON.stringify({ from, to, text, type, ...extra }),
+  });
+}
+
+// Upload media (base64) to server, returns mediaId
+export async function uploadMedia(data: string): Promise<string> {
+  const res = await fetchAPI('/chat/media', {
+    method: 'POST',
+    body: JSON.stringify({ data }),
+  });
+  return res.id;
+}
+
+// Download media by ID, returns base64 string
+export async function getMedia(id: string): Promise<string | null> {
+  try {
+    const res = await fetchAPI(`/chat/media/${id}`);
+    return res.data || null;
+  } catch { return null; }
+}
+
+export async function getMessages(user1: string, user2: string) {
+  return fetchAPI(`/chat/${user1}/${user2}`);
+}
+
+export async function markMessagesRead(user1: string, user2: string, reader: string) {
+  return fetchAPI('/chat/read', {
+    method: 'POST',
+    body: JSON.stringify({ user1, user2, reader }),
+  });
+}
+
+export async function clearChat(user1: string, user2: string, requester: string) {
+  return fetchAPI('/chat/clear', {
+    method: 'POST',
+    body: JSON.stringify({ user1, user2, requester }),
+  });
+}
+
+// ==================== PRODUTOS ====================
+export async function createProduct(vendorUsername: string, data: { name: string; description?: string; price: number; category?: string }) {
+  return fetchAPI('/products', {
+    method: 'POST',
+    body: JSON.stringify({ vendorUsername, ...data }),
+  });
+}
+
+export async function getProducts(vendorUsername: string) {
+  return fetchAPI(`/products/${vendorUsername}`);
+}
+
+export async function updateProduct(productId: string, data: any) {
+  return fetchAPI(`/products/${productId}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteProduct(vendorUsername: string, productId: string) {
+  return fetchAPI(`/products/${vendorUsername}/${productId}`, {
+    method: 'DELETE',
+  });
+}
+
+// ==================== PEDIDOS ====================
+export async function createOrder(data: { clientUsername: string; vendorUsername: string; items: any[]; total: number; deliveryAddress?: string }) {
+  return fetchAPI('/orders', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function getVendorOrders(username: string) {
+  return fetchAPI(`/orders/vendor/${username}`);
+}
+
+export async function getClientOrders(username: string) {
+  return fetchAPI(`/orders/client/${username}`);
+}
+
+export async function getDriverOrders(username: string) {
+  return fetchAPI(`/orders/driver/${username}`);
+}
+
+export async function updateOrderStatus(orderId: string, data: { status: string; vendorUsername: string; clientUsername: string; driverUsername?: string }) {
+  return fetchAPI(`/orders/${orderId}/status`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+// ==================== STATUS ONLINE/OFFLINE ====================
+export async function setUserStatus(username: string, online: boolean) {
+  return fetchAPI('/status', {
+    method: 'POST',
+    body: JSON.stringify({ username, online }),
+  });
+}
+
+export async function getUserStatus(username: string) {
+  return fetchAPI(`/status/${username}`);
+}
+
+// ==================== MÉTRICAS ====================
+export async function getMetrics(username: string) {
+  return fetchAPI(`/metrics/${username}`);
+}
+
+// ==================== LIMPEZA ====================
+export async function cleanup() {
+  return fetchAPI('/cleanup', { method: 'POST' });
+}
+
+// ==================== HIERARQUIA ====================
+export async function getHierarchy() {
+  return fetchAPI('/hierarchy');
+}
+
+// ==================== DELETAR VENDEDOR EM CASCATA ====================
+export async function deleteVendorCascade(username: string) {
+  return fetchAPI(`/vendor/${username}`, { method: 'DELETE' });
+}
+
+// ==================== DIAGNÓSTICO DE VÍNCULO ====================
+export async function debugLink(username: string) {
+  return fetchAPI(`/debug/link/${username}`);
+}
+
+// ==================== PIXWAVE / DEPIX ====================
+export async function savePixwaveConfig(apiKey: string) {
+  return fetchAPI('/pixwave/config', { method: 'POST', body: JSON.stringify({ apiKey }) });
+}
+
+export async function getPixwaveConfig() {
+  return fetchAPI('/pixwave/config');
+}
+
+export async function disconnectPixwave() {
+  return fetchAPI('/pixwave/config', { method: 'DELETE' });
+}
+
+export async function createPixwaveInvoice(data: {
+  description: string;
+  price: number;
+  externalId?: string;
+  redirectTo?: string;
+  metadata?: Record<string, unknown>;
+}) {
+  return fetchAPI('/pixwave/invoice', { method: 'POST', body: JSON.stringify(data) });
+}
+
+export async function getPixwaveInvoice(invoiceId: string) {
+  return fetchAPI(`/pixwave/invoice/${invoiceId}`);
+}
+
+export async function listPixwaveInvoices() {
+  return fetchAPI('/pixwave/invoices');
+}
+
+export async function getPixwaveDashboard() {
+  return fetchAPI('/pixwave/dashboard');
+}
+
+// ==================== DIRECT PIX SALES ====================
+export async function recordDirectPixSale(data: { vendorUsername: string; amount: number; invoiceId: string; description?: string }) {
+  return fetchAPI('/pix-direct-sale', { method: 'POST', body: JSON.stringify(data) });
+}
+
+// ==================== VENDOR COMMISSION RATE ====================
+export async function getVendorCommission(username: string) {
+  return fetchAPI(`/vendor-commission/${username}`);
+}
+
+export async function setVendorCommission(username: string, rate: number) {
+  return fetchAPI(`/vendor-commission/${username}`, { method: 'PUT', body: JSON.stringify({ rate }) });
+}
+
+// ==================== CALL SIGNALING ====================
+export async function initiateCall(from: string, to: string, type: 'voice' | 'video', fromName: string, fromPhoto?: string) {
+  return fetchAPI('/calls/initiate', { method: 'POST', body: JSON.stringify({ from, to, type, fromName, fromPhoto }) });
+}
+
+export async function checkIncomingCall(username: string) {
+  return fetchAPI(`/calls/incoming/${username}`);
+}
+
+export async function answerCall(username: string, callId: string) {
+  return fetchAPI('/calls/answer', { method: 'POST', body: JSON.stringify({ username, callId }) });
+}
+
+export async function endCall(username: string) {
+  return fetchAPI('/calls/end', { method: 'POST', body: JSON.stringify({ username }) });
+}
+
+export async function getCallStatus(username: string) {
+  return fetchAPI(`/calls/status/${username}`);
 }

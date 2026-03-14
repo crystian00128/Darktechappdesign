@@ -8,7 +8,7 @@ export default function App() {
     // Inicializar banco de dados com admin ao carregar app
     const initDB = async () => {
       try {
-        console.log("🔄 Tentando inicializar banco de dados...");
+        console.log("🔄 Inicializando banco de dados...");
         const response = await api.initDatabase();
         console.log("✅ Banco inicializado:", response.message);
         console.log("🔑 Login Admin: username='admin', PIN='414243'");
